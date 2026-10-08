@@ -399,6 +399,94 @@ void main() {
         expect(document.getNodeIndexById(fourthNode.id), 2);
       });
     });
+
+    group("getNodeById returns the correct node", () {
+      test("when replacing a node with one of the same ID", () {
+        final document = _createThreeParagraphDoc();
+        final edited = ParagraphNode(id: "2", text: AttributedText("This is the edited paragraph."));
+
+        document.replaceNodeById("2", edited);
+
+        expect(document.getNodeById("2"), same(edited));
+        expect(document.getNodeAt(1), same(edited));
+        expect(document.getNodeIndexById("2"), 1);
+      });
+
+      test("when deleting a node", () {
+        final document = _createThreeParagraphDoc();
+
+        document.deleteNode("2");
+
+        expect(document.getNodeById("2"), isNull);
+        expect(document.getNodeIndexById("2"), -1);
+        expect(document.getNodeById("3"), same(document.getNodeAt(1)));
+      });
+
+      test("when inserting a node", () {
+        final document = _createThreeParagraphDoc();
+        final inserted = ParagraphNode(id: "4", text: AttributedText("This is the inserted paragraph."));
+
+        document.insertNodeAfter(existingNodeId: "1", newNode: inserted);
+
+        expect(document.getNodeById("4"), same(inserted));
+        expect(document.getNodeIndexById("4"), 1);
+        expect(document.getNodeIndexById("3"), 3);
+      });
+    });
+
+    group("an ID that several nodes have finds the last of them", () {
+      MutableDocument sharingAnId() => MutableDocument(
+            nodes: [
+              ParagraphNode(id: "1", text: AttributedText("First")),
+              ParagraphNode(id: "shared", text: AttributedText("Second")),
+              ParagraphNode(id: "3", text: AttributedText("Third")),
+              ParagraphNode(id: "shared", text: AttributedText("Fourth")),
+            ],
+          );
+
+      test("when the last of them is replaced", () {
+        final document = sharingAnId();
+        final first = document.getNodeAt(1);
+        final edited = ParagraphNode(id: "shared", text: AttributedText("Edited"));
+
+        document.replaceNodeById("shared", edited);
+
+        expect(document.getNodeAt(1), same(first));
+        expect(document.getNodeById("shared"), same(edited));
+        expect(document.getNodeIndexById("shared"), 3);
+      });
+
+      test("when the last of them takes a new ID", () {
+        final document = sharingAnId();
+        final first = document.getNodeAt(1);
+
+        document.replaceNodeById("shared", ParagraphNode(id: "4", text: AttributedText("Fourth")));
+
+        expect(document.getNodeById("shared"), same(first));
+        expect(document.getNodeIndexById("shared"), 1);
+        expect(document.getNodeIndexById("4"), 3);
+      });
+
+      test("when the last of them is deleted", () {
+        final document = sharingAnId();
+        final first = document.getNodeAt(1);
+
+        document.deleteNodeAt(3);
+
+        expect(document.getNodeById("shared"), same(first));
+        expect(document.getNodeIndexById("shared"), 1);
+      });
+
+      test("when one is inserted before them", () {
+        final document = sharingAnId();
+        final last = document.getNodeAt(3);
+
+        document.insertNodeAt(0, ParagraphNode(id: "shared", text: AttributedText("Zeroth")));
+
+        expect(document.getNodeById("shared"), same(last));
+        expect(document.getNodeIndexById("shared"), 4);
+      });
+    });
   });
 }
 
