@@ -50,6 +50,12 @@ class RenderSliverContentLayers extends RenderSliver with RenderSliverHelpers im
   /// extent changes, or when the content's scroll extent changes.
   Size? _layerSize;
 
+  /// Whether the content asked for the layers to rebuild during a layout, which might
+  /// have ended in a scroll offset correction, before the layers were rebuilt.
+  ///
+  /// See [ContentLayersContentLayoutReporter].
+  bool _isLayerRebuildRequestedByContent = false;
+
   @override
   void attach(PipelineOwner owner) {
     contentLayersLog.info("Attaching RenderSliverContentLayers to owner: $owner");
@@ -226,6 +232,14 @@ class RenderSliverContentLayers extends RenderSliver with RenderSliverHelpers im
     _content!.layout(constraints, parentUsesSize: true);
     contentLayersLog.fine("Content after layout: $_content");
 
+    // A content that built something during its layout, e.g., during a scroll, asks for
+    // the layers to rebuild, even when its size didn't change.
+    final content = _content;
+    if (content is ContentLayersContentLayoutReporter &&
+        (content as ContentLayersContentLayoutReporter).takeLayerRebuildRequest()) {
+      _isLayerRebuildRequestedByContent = true;
+    }
+
     // The size of the layers, and the our size, is exactly the same as the content.
     final SliverGeometry sliverLayoutGeometry = _content!.geometry!;
     if (sliverLayoutGeometry.scrollOffsetCorrection != null) {
@@ -261,7 +275,8 @@ class RenderSliverContentLayers extends RenderSliver with RenderSliverHelpers im
     // Only rebuild the layers when the content layout might have changed, or someone asked
     // for it. Scrolling changes our constraints on every frame, but it doesn't change the
     // content layout, so a layout that only scrolls doesn't rebuild the layers.
-    if (isLayerRebuildRequested || layerSize != _layerSize) {
+    if (isLayerRebuildRequested || _isLayerRebuildRequestedByContent || layerSize != _layerSize) {
+      _isLayerRebuildRequestedByContent = false;
       contentLayersLog.fine("Building layers");
       invokeLayoutCallback((constraints) {
         // Usually, widgets are built during the build phase, but we're building the layers

@@ -1,15 +1,21 @@
+import 'dart:async';
 import 'dart:math';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/rendering.dart';
+import 'package:flutter/scheduler.dart';
 import 'package:flutter/widgets.dart';
 import 'package:super_editor/src/core/document.dart';
 import 'package:super_editor/src/core/document_layout.dart';
 import 'package:super_editor/src/core/document_selection.dart';
+import 'package:super_editor/src/default_editor/layout_single_column/super_editor_dry_layout.dart';
 import 'package:super_editor/src/default_editor/text.dart';
 import 'package:super_editor/src/infrastructure/_logging.dart';
+import 'package:super_editor/src/infrastructure/content_layers.dart';
 
 import '_presenter.dart';
+
+part '_progressive_layout.dart';
 
 /// Displays a document in a single-column layout.
 ///
@@ -33,6 +39,8 @@ class SingleColumnDocumentLayout extends StatefulWidget {
     required this.componentBuilders,
     this.onBuildScheduled,
     this.wrapWithSliverAdapter = true,
+    this.progressiveLayout,
+    this.allowProgressiveLayout = true,
     this.showDebugPaint = false,
   }) : super(key: key);
 
@@ -62,6 +70,26 @@ class SingleColumnDocumentLayout extends StatefulWidget {
   /// can be displayed within a `Sliver`.
   final bool wrapWithSliverAdapter;
 
+  /// Shows the first frame before every component is built, and builds the rest over the
+  /// following frames, when given, or builds every component in the first frame, when
+  /// `null`.
+  ///
+  /// This layout decides whether it lays out progressively in its first build. It builds
+  /// every component at once when [allowProgressiveLayout] is `false`, when
+  /// [wrapWithSliverAdapter] is `false`, when its nearest viewport shrink-wraps its
+  /// content, isn't vertical, or is a `SuperEditorDryLayout`'s viewport.
+  ///
+  /// See [SingleColumnProgressiveLayout].
+  final SingleColumnProgressiveLayout? progressiveLayout;
+
+  /// Whether this layout may lay out progressively, which is `false`, e.g., when the
+  /// editor shrink-wraps its content.
+  ///
+  /// When `false`, this layout builds every component at once, even when it's given a
+  /// [progressiveLayout], or when [SingleColumnProgressiveLayout.debugProgressiveByDefault]
+  /// is `true`.
+  final bool allowProgressiveLayout;
+
   /// Adds a debugging UI to the document layout, when true.
   final bool showDebugPaint;
 
@@ -69,7 +97,8 @@ class SingleColumnDocumentLayout extends StatefulWidget {
   State createState() => _SingleColumnDocumentLayoutState();
 }
 
-class _SingleColumnDocumentLayoutState extends State<SingleColumnDocumentLayout> implements DocumentLayout {
+class _SingleColumnDocumentLayoutState extends State<SingleColumnDocumentLayout>
+    implements DocumentLayout, ProgressiveDocumentLayout {
   final Map<String, GlobalKey> _nodeIdsToComponentKeys = {};
   final Map<GlobalKey, String> _componentKeysToNodeIds = {};
 
@@ -77,6 +106,42 @@ class _SingleColumnDocumentLayoutState extends State<SingleColumnDocumentLayout>
   // traverse components without repeatedly querying a `Document`
   // to determine component ordering.
   final List<GlobalKey> _topToBottomComponentKeys = [];
+
+  /// The node IDs, in the same order as [_topToBottomComponentKeys], which is the order of
+  /// the children of the column of components.
+  final List<String> _topToBottomNodeIds = [];
+
+  /// The index of each node's component in [_topToBottomComponentKeys], by node ID, which
+  /// is the first index for a node ID that appears more than once.
+  final Map<String, int> _nodeIndicesById = {};
+
+  /// Whether this layout decided, in its first build, if it lays out progressively.
+  bool _hasDecidedProgressiveLayout = false;
+
+  /// The nodes that aren't built yet, when this layout lays out progressively, which it
+  /// keeps after every node is built.
+  _ProgressiveFill? _fill;
+
+  /// The progressive fill, while it still has nodes to build.
+  _ProgressiveFill? get _activeFill {
+    final fill = _fill;
+    return fill != null && fill.isActive ? fill : null;
+  }
+
+  /// The render sliver of this layout, when it lays out progressively.
+  _RenderSliverProgressiveAdapter? get _progressiveAdapter {
+    if (!mounted) {
+      return null;
+    }
+    final renderObject = context.findRenderObject();
+    return renderObject is _RenderSliverProgressiveAdapter ? renderObject : null;
+  }
+
+  /// The controller that was attached to report that this layout built everything at once.
+  SingleColumnProgressiveLayoutController? _eagerController;
+
+  /// Whether this layout built its components at least once.
+  bool _hasBuiltComponents = false;
 
   late SingleColumnLayoutPresenterChangeListener _presenterListener;
 
@@ -146,11 +211,37 @@ class _SingleColumnDocumentLayoutState extends State<SingleColumnDocumentLayout>
 
       widget.presenter.updateViewModel();
     }
+
+    if (_hasDecidedProgressiveLayout) {
+      _updateProgressiveLayout();
+    }
+  }
+
+  /// Gives the progressive fill the layout's new configuration, or builds everything
+  /// when the layout no longer lays out progressively.
+  void _updateProgressiveLayout() {
+    final fill = _fill;
+    if (fill == null) {
+      final controller = widget.progressiveLayout?.controller;
+      if (!identical(controller, _eagerController)) {
+        _eagerController = controller;
+        controller?._isComplete._set(true);
+      }
+      return;
+    }
+
+    final config = _progressiveLayoutConfig;
+    if (config == null) {
+      fill.completeNow();
+      return;
+    }
+    fill.config = config;
   }
 
   @override
   void dispose() {
     widget.presenter.removeChangeListener(_presenterListener);
+    _fill?.dispose();
     super.dispose();
   }
 
@@ -198,6 +289,9 @@ class _SingleColumnDocumentLayoutState extends State<SingleColumnDocumentLayout>
 
     final componentKey = _findComponentAtOffset(documentOffset);
     if (componentKey == null || componentKey.currentContext == null) {
+      // There's no component at the offset, but there might be a node that isn't built
+      // yet. Build it for the next lookup.
+      _ensureBuiltAtOffset(documentOffset);
       return null;
     }
 
@@ -237,6 +331,10 @@ class _SingleColumnDocumentLayoutState extends State<SingleColumnDocumentLayout>
       }
     }
 
+    // The nearest component skips the nodes that aren't built yet. When the offset is over
+    // one of them, build it for the next lookup.
+    _ensureBuiltAtOffset(documentOffset);
+
     final componentKey = _findComponentClosestToOffset(documentOffset);
     if (componentKey == null || componentKey.currentContext == null) {
       return null;
@@ -244,6 +342,32 @@ class _SingleColumnDocumentLayoutState extends State<SingleColumnDocumentLayout>
 
     return _getDocumentPositionInComponentNearOffset(componentKey, documentOffset);
   }
+
+  /// Builds the node at [documentOffset] in the next frame, if it isn't built yet.
+  void _ensureBuiltAtOffset(Offset documentOffset) {
+    final fill = _activeFill;
+    final column = _componentColumn;
+    if (fill == null || column == null || !column.hasSize || column.childCount == 0) {
+      return;
+    }
+
+    final columnOffset = (column.parentData! as BoxParentData).offset;
+    final index = column._lastChildStartingAtOrAbove(documentOffset.dy - columnOffset.dy);
+    if (index < 0) {
+      return;
+    }
+    final child = column.childAt(index);
+    final childRect = column.childRectAt(index).shift(columnOffset);
+    if (child is _RenderComponentPlaceholder && documentOffset.dy < childRect.bottom) {
+      fill.ensureBuilt([child.nodeId]);
+    }
+  }
+
+  @override
+  bool isComponentDeferred(String nodeId) => _activeFill?.isDeferred(nodeId) ?? false;
+
+  @override
+  void ensureComponentsBuilt(Iterable<String> nodeIds) => _activeFill?.ensureBuilt(nodeIds);
 
   DocumentPosition? _getDocumentPositionInComponentNearOffset(GlobalKey componentKey, Offset documentOffset) {
     final component = componentKey.currentState as DocumentComponent;
@@ -272,7 +396,11 @@ class _SingleColumnDocumentLayoutState extends State<SingleColumnDocumentLayout>
     }
 
     final componentKey = _topToBottomComponentKeys.first;
-    final componentBox = componentKey.currentContext!.findRenderObject() as RenderBox;
+    final componentBox = componentKey.currentContext?.findRenderObject();
+    if (componentBox is! RenderBox) {
+      // The first node isn't built yet. Compare with its placeholder.
+      return documentOffset.dy < _getComponentBoundsByIndex(0).top;
+    }
     final offsetAtComponent = _componentOffset(componentBox, documentOffset);
 
     return offsetAtComponent.dy < 0.0;
@@ -286,7 +414,11 @@ class _SingleColumnDocumentLayoutState extends State<SingleColumnDocumentLayout>
     }
 
     final componentKey = _topToBottomComponentKeys.last;
-    final componentBox = componentKey.currentContext!.findRenderObject() as RenderBox;
+    final componentBox = componentKey.currentContext?.findRenderObject();
+    if (componentBox is! RenderBox) {
+      // The last node isn't built yet. Compare with its placeholder.
+      return documentOffset.dy > _getComponentBoundsByIndex(_topToBottomComponentKeys.length - 1).bottom;
+    }
     final offsetAtComponent = _componentOffset(componentBox, documentOffset);
 
     return offsetAtComponent.dy > componentBox.size.height;
@@ -341,6 +473,8 @@ class _SingleColumnDocumentLayoutState extends State<SingleColumnDocumentLayout>
 
   @override
   Rect? getRectForSelection(DocumentPosition base, DocumentPosition extent) {
+    // A node that isn't built yet has no component, so there's no rect for a selection
+    // that starts, or ends, in it.
     final baseComponent = getComponentByNodeId(base.nodeId);
     final extentComponent = getComponentByNodeId(extent.nodeId);
     if (baseComponent == null || extentComponent == null) {
@@ -373,11 +507,22 @@ class _SingleColumnDocumentLayoutState extends State<SingleColumnDocumentLayout>
     } else {
       // Selection across nodes.
       final selectedNodes = _getNodeIdsBetween(base.nodeId, extent.nodeId);
-      topComponent = getComponentByNodeId(selectedNodes.first)!;
+      if (selectedNodes.isEmpty) {
+        return null;
+      }
+      topComponent = selectedNodes.first == base.nodeId ? baseComponent : extentComponent;
       final startPosition = selectedNodes.first == base.nodeId ? base.nodePosition : extent.nodePosition;
       final endPosition = selectedNodes.first == base.nodeId ? extent.nodePosition : base.nodePosition;
+      final topIndex = _nodeIndicesById[selectedNodes.first]!;
 
       for (int i = 0; i < selectedNodes.length; ++i) {
+        if (i > 0 && i < selectedNodes.length - 1 && isComponentDeferred(selectedNodes[i])) {
+          // This node sits between start and end, and it isn't built yet. Its whole
+          // placeholder is selected.
+          componentBoundingBoxes.add(_getComponentBoundsByIndex(topIndex + i));
+          continue;
+        }
+
         final component = getComponentByNodeId(selectedNodes[i])!;
         final componentOffsetInDocument =
             (component.context.findRenderObject() as RenderBox).localToGlobal(Offset.zero, ancestor: documentLayoutBox);
@@ -433,17 +578,19 @@ class _SingleColumnDocumentLayoutState extends State<SingleColumnDocumentLayout>
     return boundingBox;
   }
 
+  /// Returns the IDs of the nodes from [baseNodeId] to [extentNodeId], in top-to-bottom
+  /// order, including the nodes that aren't built yet, or an empty list if either node
+  /// isn't in this layout.
   List<String> _getNodeIdsBetween(String baseNodeId, String extentNodeId) {
-    final baseComponentKey = _nodeIdsToComponentKeys[baseNodeId]!;
-    final baseComponentIndex = _topToBottomComponentKeys.indexOf(baseComponentKey);
-    final extentComponentKey = _nodeIdsToComponentKeys[extentNodeId]!;
-    final extentComponentIndex = _topToBottomComponentKeys.indexOf(extentComponentKey);
+    final baseComponentIndex = _nodeIndicesById[baseNodeId];
+    final extentComponentIndex = _nodeIndicesById[extentNodeId];
+    if (baseComponentIndex == null || extentComponentIndex == null) {
+      return const [];
+    }
 
-    final topNodeIndex = baseComponentIndex <= extentComponentIndex ? baseComponentIndex : extentComponentIndex;
-    final bottomNodeIndex = topNodeIndex == baseComponentIndex ? extentComponentIndex : baseComponentIndex;
-    final componentsInside = _topToBottomComponentKeys.sublist(topNodeIndex, bottomNodeIndex + 1);
-
-    return componentsInside.map((componentKey) => _componentKeysToNodeIds[componentKey]!).toList();
+    final topNodeIndex = min(baseComponentIndex, extentComponentIndex);
+    final bottomNodeIndex = max(baseComponentIndex, extentComponentIndex);
+    return _topToBottomNodeIds.sublist(topNodeIndex, bottomNodeIndex + 1);
   }
 
   @override
@@ -760,13 +907,24 @@ class _SingleColumnDocumentLayoutState extends State<SingleColumnDocumentLayout>
       return null;
     }
 
-    final componentKey = _topToBottomComponentKeys.first;
-    final component = componentKey.currentState as DocumentComponent;
+    // The first node is always built, except for a moment when a node was added at the top
+    // of a document that lays out progressively. Use the first node that's built until then.
+    for (int i = 0; i < _topToBottomComponentKeys.length; i += 1) {
+      final componentKey = _topToBottomComponentKeys[i];
+      final component = componentKey.currentState;
+      if (component is! DocumentComponent) {
+        if (i == 0) {
+          _activeFill?.ensureBuilt([_topToBottomNodeIds[i]]);
+        }
+        continue;
+      }
 
-    return DocumentPosition(
-      nodeId: _componentKeysToNodeIds[componentKey]!,
-      nodePosition: component.getBeginningPosition(),
-    );
+      return DocumentPosition(
+        nodeId: _componentKeysToNodeIds[componentKey]!,
+        nodePosition: component.getBeginningPosition(),
+      );
+    }
+    return null;
   }
 
   /// Returns the [DocumentPosition] at the end of the last node or `null` if the document is empty.
@@ -775,13 +933,24 @@ class _SingleColumnDocumentLayoutState extends State<SingleColumnDocumentLayout>
       return null;
     }
 
-    final componentKey = _topToBottomComponentKeys.last;
-    final component = componentKey.currentState as DocumentComponent;
+    // The last node is always built, except for a moment when a node was added at the end
+    // of a document that lays out progressively. Use the last node that's built until then.
+    for (int i = _topToBottomComponentKeys.length - 1; i >= 0; i -= 1) {
+      final componentKey = _topToBottomComponentKeys[i];
+      final component = componentKey.currentState;
+      if (component is! DocumentComponent) {
+        if (i == _topToBottomComponentKeys.length - 1) {
+          _activeFill?.ensureBuilt([_topToBottomNodeIds[i]]);
+        }
+        continue;
+      }
 
-    return DocumentPosition(
-      nodeId: _componentKeysToNodeIds[componentKey]!,
-      nodePosition: component.getEndPosition(),
-    );
+      return DocumentPosition(
+        nodeId: _componentKeysToNodeIds[componentKey]!,
+        nodePosition: component.getEndPosition(),
+      );
+    }
+    return null;
   }
 
   bool _isOffsetInComponent(RenderBox componentBox, Offset documentOffset) {
@@ -827,6 +996,11 @@ class _SingleColumnDocumentLayoutState extends State<SingleColumnDocumentLayout>
       return null;
     }
     if (key.currentState is! DocumentComponent) {
+      if (isComponentDeferred(nodeId)) {
+        // The layout lays out progressively, and it hasn't built this node yet.
+        return null;
+      }
+
       editorLayoutLog.info(
           'WARNING: found component but it\'s not a DocumentComponent: $nodeId, layout key: $key, state: ${key.currentState}, widget: ${key.currentWidget}, context: ${key.currentContext}');
       if (kDebugMode) {
@@ -860,7 +1034,17 @@ class _SingleColumnDocumentLayoutState extends State<SingleColumnDocumentLayout>
 
     for (int i = _topToBottomComponentKeys.length - 1; i >= 0; i--) {
       final componentKey = _topToBottomComponentKeys[i];
-      final component = componentKey.currentState as DocumentComponent;
+      final component = componentKey.currentState;
+      if (component is! DocumentComponent) {
+        if (isComponentDeferred(_topToBottomNodeIds[i])) {
+          // A progressive layout builds the nodes from the end back to the last selectable
+          // one, but it hasn't, yet, e.g., because a node was just added at the end. We can't
+          // tell whether this node is selectable until it's built.
+          ensureComponentsBuilt([_topToBottomNodeIds[i]]);
+          return null;
+        }
+        continue;
+      }
 
       if (component.isVisualSelectionSupported()) {
         nodePosition = component.getEndPosition();
@@ -888,6 +1072,11 @@ class _SingleColumnDocumentLayoutState extends State<SingleColumnDocumentLayout>
   @override
   Widget build(BuildContext context) {
     editorLayoutLog.fine("Building document layout");
+    if (!_hasDecidedProgressiveLayout) {
+      _hasDecidedProgressiveLayout = true;
+      _startProgressiveLayoutIfPossible();
+    }
+
     Widget result = Padding(
       key: _boxKey,
       padding: widget.presenter.viewModel.padding,
@@ -897,13 +1086,120 @@ class _SingleColumnDocumentLayoutState extends State<SingleColumnDocumentLayout>
     );
 
     if (widget.wrapWithSliverAdapter) {
-      result = SliverToBoxAdapter(
-        child: result,
-      );
+      // A layout that laid out progressively keeps its adapter after every node is
+      // built, so that its subtree isn't replaced.
+      result = _fill != null
+          ? _SliverProgressiveAdapter(
+              fill: _fill,
+              child: result,
+            )
+          : SliverToBoxAdapter(
+              child: result,
+            );
     }
 
     editorLayoutLog.fine("Done building document");
     return result;
+  }
+
+  /// The progressive layout configuration that applies to this layout, if any.
+  SingleColumnProgressiveLayout? get _progressiveLayoutConfig {
+    if (!widget.allowProgressiveLayout) {
+      return null;
+    }
+    return widget.progressiveLayout ??
+        (SingleColumnProgressiveLayout.debugProgressiveByDefault
+            ? const SingleColumnProgressiveLayout._debugDefault()
+            : null);
+  }
+
+  /// Whether this layout sits in a viewport in which it can lay out progressively.
+  bool _canLayOutProgressively() {
+    if (!widget.wrapWithSliverAdapter) {
+      return false;
+    }
+
+    final viewport = context.findAncestorRenderObjectOfType<RenderAbstractViewport>();
+    if (viewport is! RenderViewport || viewport is RenderViewportWithDryLayout) {
+      // A shrink-wrapping viewport lays out all of its content, and a dry layout reports
+      // the intrinsic height of all of it.
+      return false;
+    }
+    return viewport.axisDirection == AxisDirection.down;
+  }
+
+  /// Decides, in the first build, which nodes the first frame builds, when this layout
+  /// lays out progressively.
+  ///
+  /// The first frame builds the nodes whose estimated bounds overlap the window around the
+  /// initial scroll offset, plus the first and the last node. The first layout builds the
+  /// nodes that it finds in the visible region, and the nodes after the last selectable
+  /// one.
+  void _startProgressiveLayoutIfPossible() {
+    final config = _progressiveLayoutConfig;
+    if (config == null || !_canLayOutProgressively()) {
+      _reportEagerLayout(widget.progressiveLayout?.controller);
+      return;
+    }
+
+    final viewModel = widget.presenter.viewModel;
+    final componentViewModels = viewModel.componentViewModels;
+    if (componentViewModels.length < 3) {
+      _reportEagerLayout(config.controller);
+      return;
+    }
+
+    final scrollPosition = context.findAncestorStateOfType<ScrollableState>()?.position;
+    final initialScrollOffset = config.initialScrollOffset?.call() ??
+        (scrollPosition != null && scrollPosition.hasPixels ? scrollPosition.pixels : 0.0);
+    // Read the screen size without depending on it, so that a change of size doesn't
+    // rebuild this layout.
+    final screenSize = context.findAncestorWidgetOfExactType<MediaQuery>()?.data.size;
+    final screenHeight = screenSize != null && screenSize.height > 0 ? screenSize.height : 800.0;
+    final screenWidth = screenSize != null && screenSize.width > 0 ? screenSize.width : 400.0;
+
+    final padding = viewModel.padding;
+    final columnWidth = max(screenWidth - padding.horizontal, 1.0);
+    final windowTop = initialScrollOffset - screenHeight * config._windowExtentAboveOffset;
+    final windowBottom = initialScrollOffset + screenHeight * config._windowExtentBelowOffset;
+    final measuredHeights = config.controller?._measuredHeights ?? const <String, double>{};
+
+    final built = <String>{};
+    var componentTop = padding.resolve(TextDirection.ltr).top;
+    for (int i = 0; i < componentViewModels.length; i += 1) {
+      final componentViewModel = componentViewModels[i];
+      final componentBottom = componentTop +
+          _ProgressiveFill._estimateChildHeight(config, measuredHeights, componentViewModel, columnWidth);
+      if (i == 0 ||
+          i == componentViewModels.length - 1 ||
+          (componentBottom > windowTop && componentTop < windowBottom)) {
+        built.add(componentViewModel.nodeId);
+      }
+      componentTop = componentBottom;
+    }
+
+    final deferred = <String>{
+      for (final componentViewModel in componentViewModels)
+        if (!built.contains(componentViewModel.nodeId)) componentViewModel.nodeId,
+    };
+    if (deferred.isEmpty) {
+      _reportEagerLayout(config.controller);
+      return;
+    }
+
+    _fill = _ProgressiveFill(
+      layout: this,
+      config: config,
+      deferred: deferred,
+      built: built,
+    );
+    _componentBuilderRegistry.fill = _fill;
+  }
+
+  /// Reports to the [controller] that this layout builds every node at once.
+  void _reportEagerLayout(SingleColumnProgressiveLayoutController? controller) {
+    _eagerController = controller;
+    controller?._isComplete._set(true);
   }
 
   List<Widget> _buildDocComponents() {
@@ -914,6 +1210,11 @@ class _SingleColumnDocumentLayoutState extends State<SingleColumnDocumentLayout>
     final newNodeIds = <GlobalKey, String>{};
     _topToBottomComponentKeys.clear();
     _componentGeometry = null;
+
+    // The indices of the nodes that this build adds, when a progressive layout is still
+    // building nodes.
+    final fill = _activeFill;
+    final addedIndices = fill != null && _hasBuiltComponents ? <int>[] : null;
 
     // Keep the same list of component builders while the builders are the same, so
     // that the builder widgets below can be reused.
@@ -941,6 +1242,9 @@ class _SingleColumnDocumentLayoutState extends State<SingleColumnDocumentLayout>
       newNodeIds[componentKey] = nodeId;
       editorLayoutLog.finer('Node -> Key: $nodeId -> $componentKey');
 
+      if (addedIndices != null && !_nodeIdsToComponentKeys.containsKey(nodeId)) {
+        addedIndices.add(_topToBottomComponentKeys.length);
+      }
       _topToBottomComponentKeys.add(componentKey);
 
       if (isDuplicateNodeId) {
@@ -994,6 +1298,23 @@ class _SingleColumnDocumentLayoutState extends State<SingleColumnDocumentLayout>
     _componentKeysToNodeIds
       ..clear()
       ..addAll(newNodeIds);
+
+    _topToBottomNodeIds.clear();
+    _nodeIndicesById.clear();
+    for (final componentViewModel in viewModel.componentViewModels) {
+      _nodeIndicesById.putIfAbsent(componentViewModel.nodeId, () => _topToBottomNodeIds.length);
+      _topToBottomNodeIds.add(componentViewModel.nodeId);
+    }
+
+    if (fill != null && addedIndices != null) {
+      // Before the builders build: decide which of the added nodes are built.
+      fill.onNodesChanged(
+        nodeIds: _topToBottomNodeIds,
+        addedIndices: addedIndices,
+        componentKeys: newComponentKeys,
+      );
+    }
+    _hasBuiltComponents = true;
 
     editorLayoutLog.finer(' - keys -> IDs after building all components:');
     _nodeIdsToComponentKeys.forEach((key, value) {
@@ -1100,6 +1421,28 @@ class _SingleColumnDocumentLayoutState extends State<SingleColumnDocumentLayout>
 /// builders of the nodes that changed to rebuild.
 class _ComponentBuilderRegistry {
   final _buildersByNodeId = <String, _PresenterComponentBuilderState>{};
+
+  /// The nodes that aren't built yet, when the layout lays out progressively.
+  _ProgressiveFill? fill;
+
+  /// Whether the builders of the node with the given [nodeId] should build a placeholder
+  /// instead of the node's component.
+  bool isDeferred(String nodeId) {
+    final fill = this.fill;
+    return fill != null && fill.isActive && fill.isDeferred(nodeId);
+  }
+
+  /// The builders of the node with the given [nodeId].
+  Iterable<_PresenterComponentBuilderState> buildersOf(String nodeId) sync* {
+    final builder = _buildersByNodeId[nodeId];
+    if (builder != null) {
+      yield builder;
+    }
+    final duplicates = _duplicateBuildersByNodeId[nodeId];
+    if (duplicates != null) {
+      yield* duplicates;
+    }
+  }
 
   /// More builders for node IDs that appear more than once in the document.
   final _duplicateBuildersByNodeId = <String, List<_PresenterComponentBuilderState>>{};
@@ -1220,6 +1563,13 @@ class _PresenterComponentBuilderState extends State<_PresenterComponentBuilder> 
     });
   }
 
+  /// Rebuilds, e.g., to build the component instead of a placeholder.
+  void _rebuild() {
+    setState(() {
+      // Re-build.
+    });
+  }
+
   /// Whether a component built from [previous] looks the same as one built from [next].
   static bool _isSameViewModel(
     SingleColumnLayoutComponentViewModel previous,
@@ -1253,6 +1603,16 @@ class _PresenterComponentBuilderState extends State<_PresenterComponentBuilder> 
     if (viewModel == null) {
       // The node was removed, and the layout will remove this builder in a moment.
       return _component ?? const SizedBox();
+    }
+
+    final fill = widget.registry.fill;
+    if (fill != null && widget.registry.isDeferred(widget.watchNode)) {
+      // The layout lays out progressively, and it hasn't built this node yet.
+      return _ComponentPlaceholder(
+        nodeId: widget.watchNode,
+        viewModel: viewModel,
+        fill: fill,
+      );
     }
 
     // Return the identical component widget when nothing that it's built from changed,
@@ -1665,7 +2025,13 @@ class RenderDocumentComponentColumn extends RenderFlex {
   void _onChildrenChanged() {
     _childList = null;
     _paintRectsOutsideOfLayout = null;
+    _childrenChangedSinceLayout = true;
   }
+
+  /// Whether children were inserted, removed, or moved since this box last ran layout, so
+  /// that the positions of the children aren't known.
+  bool get childrenChangedSinceLayout => _childrenChangedSinceLayout;
+  bool _childrenChangedSinceLayout = true;
 
   @override
   void performLayout() {
@@ -1673,6 +2039,7 @@ class RenderDocumentComponentColumn extends RenderFlex {
 
     _layoutCount += 1;
     _paintRectsOutsideOfLayout = null;
+    _childrenChangedSinceLayout = false;
   }
 
   /// Whether the children are stacked from top to bottom, which the binary searches in

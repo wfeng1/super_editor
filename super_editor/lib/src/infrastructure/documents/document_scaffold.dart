@@ -26,6 +26,7 @@ class DocumentScaffold<ContextType> extends StatefulWidget {
     required this.presenter,
     required this.componentBuilders,
     required this.shrinkWrap,
+    this.progressiveLayout,
     this.underlays = const [],
     this.overlays = const [],
     this.debugPaint = const DebugPaintConfig(),
@@ -85,6 +86,12 @@ class DocumentScaffold<ContextType> extends StatefulWidget {
   /// Only used when the document is not inside a scrollable.
   final bool shrinkWrap;
 
+  /// Lays out the document progressively, building what's visible first, and the rest over
+  /// the following frames, when given, unless [shrinkWrap] is `true`.
+  ///
+  /// See [SingleColumnProgressiveLayout].
+  final SingleColumnProgressiveLayout? progressiveLayout;
+
   @override
   State<DocumentScaffold> createState() => _DocumentScaffoldState();
 }
@@ -139,6 +146,9 @@ class _DocumentScaffoldState extends State<DocumentScaffold> {
         presenter: widget.presenter,
         componentBuilders: widget.componentBuilders,
         onBuildScheduled: onBuildScheduled,
+        // A shrink-wrapped document lays out all of its content anyway.
+        progressiveLayout: widget.progressiveLayout,
+        allowProgressiveLayout: !widget.shrinkWrap,
         showDebugPaint: widget.debugPaint.layout,
       ),
       underlays: widget.underlays,

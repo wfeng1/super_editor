@@ -354,6 +354,20 @@ abstract class RenderContentLayers implements RenderObject {
   void removeChild(covariant RenderObject child, Object slot);
 }
 
+/// The render object of a [ContentLayers]' content that can change what it displays during
+/// its own layout, e.g., because it builds children in a layout callback, and that asks the
+/// [ContentLayers] to rebuild its layers when it does.
+///
+/// The [ContentLayers] rebuilds its layers after its content's layout when the content's
+/// layout was requested from outside, or when the content's size changed. A content that
+/// changes what it displays during a layout that didn't change its size, e.g., one that
+/// only scrolls, reports it here instead.
+abstract interface class ContentLayersContentLayoutReporter {
+  /// Returns whether a layout of the content changed what it displays, in a way that the
+  /// layers should be rebuilt for, since the last call, and resets that report.
+  bool takeLayerRebuildRequest();
+}
+
 bool isContentLayersSlot(Object slot) => slot == contentSlot || slot is UnderlaySlot || slot is OverlaySlot;
 
 const contentSlot = "content";

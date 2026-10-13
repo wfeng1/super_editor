@@ -142,6 +142,7 @@ class SuperEditor extends StatefulWidget {
     this.plugins = const {},
     this.debugPaint = const DebugPaintConfig(),
     this.shrinkWrap = false,
+    this.progressiveLayout,
     this.log = const SuperEditorPrintLog(),
   })  : stylesheet = stylesheet ?? defaultStylesheet,
         selectionStyles = selectionStyle ?? defaultSelectionStyle,
@@ -383,6 +384,17 @@ class SuperEditor extends StatefulWidget {
   /// Whether the scroll view used by the editor should shrink-wrap its contents.
   /// Only used when editor is not inside an scrollable.
   final bool shrinkWrap;
+
+  /// Shows the first frame before the whole document is built, and builds the rest over
+  /// the following frames, when given, or builds the whole document in the first frame,
+  /// when `null`.
+  ///
+  /// Editing should wait until the layout built everything, which its
+  /// [SingleColumnProgressiveLayout.controller] reports. Ignored when [shrinkWrap] is
+  /// `true`, and in a `SuperEditorDryLayout`.
+  ///
+  /// See [SingleColumnProgressiveLayout].
+  final SingleColumnProgressiveLayout? progressiveLayout;
 
   /// A log that reports specific errors and exceptional events that occur while
   /// running a [SuperEditor].
@@ -766,6 +778,7 @@ class SuperEditorState extends State<SuperEditor> {
               presenter: presenter,
               componentBuilders: widget.componentBuilders,
               shrinkWrap: widget.shrinkWrap,
+              progressiveLayout: widget.progressiveLayout,
               underlays: [
                 // Add all underlays from plugins.
                 for (final plugin in widget.plugins) //

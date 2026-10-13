@@ -15,6 +15,7 @@ import 'package:super_editor/src/default_editor/blockquote.dart';
 import 'package:super_editor/src/default_editor/document_scrollable.dart';
 import 'package:super_editor/src/default_editor/horizontal_rule.dart';
 import 'package:super_editor/src/default_editor/image.dart';
+import 'package:super_editor/src/default_editor/layout_single_column/_layout.dart';
 import 'package:super_editor/src/default_editor/layout_single_column/_presenter.dart';
 import 'package:super_editor/src/default_editor/layout_single_column/_styler_per_component.dart';
 import 'package:super_editor/src/default_editor/layout_single_column/_styler_shylesheet.dart';
@@ -73,6 +74,7 @@ class SuperReader extends StatefulWidget {
     this.createOverlayControlsClipper,
     this.debugPaint = const DebugPaintConfig(),
     this.shrinkWrap = false,
+    this.progressiveLayout,
   })  : stylesheet = stylesheet ?? readOnlyDefaultStylesheet,
         selectionStyles = selectionStyle ?? readOnlyDefaultSelectionStyle,
         keyboardActions = keyboardActions ?? superReaderDefaultKeyboardActions,
@@ -213,6 +215,15 @@ class SuperReader extends StatefulWidget {
   /// Whether the scroll view used by the reader should shrink-wrap its contents.
   /// Only used when reader is not inside an scrollable.
   final bool shrinkWrap;
+
+  /// Shows the first frame before the whole document is built, and builds the rest over
+  /// the following frames, when given, or builds the whole document in the first frame,
+  /// when `null`.
+  ///
+  /// Ignored when [shrinkWrap] is `true`, and in a `SuperEditorDryLayout`.
+  ///
+  /// See [SingleColumnProgressiveLayout].
+  final SingleColumnProgressiveLayout? progressiveLayout;
 
   @override
   State<SuperReader> createState() => SuperReaderState();
@@ -403,6 +414,7 @@ class SuperReaderState extends State<SuperReader> {
             presenter: _docLayoutPresenter!,
             componentBuilders: widget.componentBuilders,
             shrinkWrap: widget.shrinkWrap,
+            progressiveLayout: widget.progressiveLayout,
             underlays: [
               // Add any underlays that were provided by the client.
               for (final underlayBuilder in widget.documentUnderlayBuilders) //
