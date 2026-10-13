@@ -1304,7 +1304,7 @@ class _AndroidDocumentTouchInteractorState extends State<AndroidDocumentTouchInt
 
   @override
   Widget build(BuildContext context) {
-    final gestureSettings = MediaQuery.maybeOf(context)?.gestureSettings;
+    final gestureSettings = MediaQuery.maybeGestureSettingsOf(context);
     // PanGestureRecognizer is above contents to have first pass at gestures, but it only accepts
     // gestures that are over caret or handles or when a long press is in progress.
     // TapGestureRecognizer is below contents so that it doesn't interferes with buttons and other
@@ -1867,7 +1867,7 @@ class SuperEditorAndroidControlsOverlayManagerState extends State<SuperEditorAnd
                           ..onUpdate = _collapsedHandleGestureDelegate.onPanUpdate
                           ..onEnd = _collapsedHandleGestureDelegate.onPanEnd
                           ..onCancel = _collapsedHandleGestureDelegate.onPanCancel
-                          ..gestureSettings = MediaQuery.maybeOf(context)?.gestureSettings;
+                          ..gestureSettings = MediaQuery.maybeGestureSettingsOf(context);
                       },
                     ),
                   },
@@ -1937,7 +1937,7 @@ class SuperEditorAndroidControlsOverlayManagerState extends State<SuperEditorAnd
                       ..onUpdate = _upstreamHandleGesturesDelegate.onPanUpdate
                       ..onEnd = _upstreamHandleGesturesDelegate.onPanEnd
                       ..onCancel = _upstreamHandleGesturesDelegate.onPanCancel
-                      ..gestureSettings = MediaQuery.maybeOf(context)?.gestureSettings;
+                      ..gestureSettings = MediaQuery.maybeGestureSettingsOf(context);
                   },
                 ),
               },
@@ -1980,7 +1980,7 @@ class SuperEditorAndroidControlsOverlayManagerState extends State<SuperEditorAnd
                       ..onUpdate = _downstreamHandleGesturesDelegate.onPanUpdate
                       ..onEnd = _downstreamHandleGesturesDelegate.onPanEnd
                       ..onCancel = _downstreamHandleGesturesDelegate.onPanCancel
-                      ..gestureSettings = MediaQuery.maybeOf(context)?.gestureSettings;
+                      ..gestureSettings = MediaQuery.maybeGestureSettingsOf(context);
                   },
                 ),
               },

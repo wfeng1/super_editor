@@ -1033,7 +1033,7 @@ class _ReadOnlyAndroidDocumentTouchInteractorState extends State<ReadOnlyAndroid
 
   @override
   Widget build(BuildContext context) {
-    final gestureSettings = MediaQuery.maybeOf(context)?.gestureSettings;
+    final gestureSettings = MediaQuery.maybeGestureSettingsOf(context);
     return SliverHybridStack(
       fillViewport: widget.fillViewport,
       children: [
@@ -1315,7 +1315,7 @@ class _AndroidDocumentTouchEditingControlsState extends State<AndroidDocumentTou
           // Remove the keyboard from the space that we occupy so that
           // clipping calculations apply to the expected visual borders,
           // instead of applying underneath the keyboard.
-          padding: EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom),
+          padding: EdgeInsets.only(bottom: MediaQuery.viewInsetsOf(context).bottom),
           child: ClipRect(
             clipper: widget.createOverlayControlsClipper?.call(context),
             child: SizedBox(

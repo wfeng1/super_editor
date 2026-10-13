@@ -1449,7 +1449,7 @@ class _IosDocumentTouchInteractorState extends State<IosDocumentTouchInteractor>
       }
     }
 
-    final gestureSettings = MediaQuery.maybeOf(context)?.gestureSettings;
+    final gestureSettings = MediaQuery.maybeGestureSettingsOf(context);
     // PanGestureRecognizer is above contents to have first pass at gestures, but it only accepts
     // gestures that are over caret or handles or when a long press is in progress.
     // TapGestureRecognizer is below contents so that it doesn't interferes with buttons and other
