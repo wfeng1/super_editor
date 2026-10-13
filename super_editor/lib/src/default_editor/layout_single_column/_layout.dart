@@ -1,6 +1,7 @@
 import 'dart:math';
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter/widgets.dart';
 import 'package:super_editor/src/core/document.dart';
 import 'package:super_editor/src/core/document_layout.dart';
@@ -776,9 +777,7 @@ class _SingleColumnDocumentLayoutState extends State<SingleColumnDocumentLayout>
     Widget result = Padding(
       key: _boxKey,
       padding: widget.presenter.viewModel.padding,
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.center,
+      child: _DocumentComponentColumn(
         children: _buildDocComponents(),
       ),
     );
@@ -1231,5 +1230,371 @@ class _Component extends StatelessWidget {
       ),
       child: component,
     );
+  }
+}
+
+/// The column of components in a [SingleColumnDocumentLayout], which lays out exactly like
+/// a [Column] with [MainAxisSize.min] and [CrossAxisAlignment.center], and which paints and
+/// hit-tests only the components around what's visible, or around the hit.
+class _DocumentComponentColumn extends Flex {
+  const _DocumentComponentColumn({
+    required super.children,
+  }) : super(
+          direction: Axis.vertical,
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.center,
+        );
+
+  @override
+  RenderDocumentComponentColumn createRenderObject(BuildContext context) {
+    return RenderDocumentComponentColumn(
+      textDirection: getEffectiveTextDirection(context),
+    );
+  }
+}
+
+/// The render box of the column of components in a [SingleColumnDocumentLayout].
+///
+/// This box lays out its children exactly like a [RenderFlex] for a [Column] with
+/// [MainAxisSize.min] and [CrossAxisAlignment.center]: one below another, from top to
+/// bottom, centered horizontally. Its intrinsic sizes, dry layout, and semantics are
+/// those of that [RenderFlex], too.
+///
+/// Unlike a [Column], this box only paints the children that can be seen, and only
+/// hit-tests the children around the hit position, so that painting and hit-testing
+/// don't get slower as a document gets longer.
+///
+/// ## Painting
+///
+/// This box paints a child when the child's paint rect intersects the visible rect,
+/// which is the canvas clip, intersected with the bounds of the nearest
+/// [RenderAbstractViewport] ancestor, and inflated by [paintCullingMargin].
+///
+/// A child's paint rect is the child's layout rect, expanded to include the child's
+/// [RenderBox.paintBounds]. [SingleColumnDocumentLayout] wraps every component in a
+/// `ConstrainedBox`, a `SizedBox`, and a `Padding`, so a child's paint rect also
+/// includes the [RenderBox.paintBounds] of the render box at the root of the component,
+/// which is the root of the widget that a [ComponentBuilder] returns. A component that
+/// paints outside of its layout rect, e.g., because it moves its content with a paint
+/// transform, must override [RenderBox.paintBounds] on its root render box to report
+/// where it paints.
+///
+/// The paint rects are read once after each layout of this box, so a change to a
+/// component's paint bounds must come with a layout of the component.
+///
+/// When a repaint boundary sits between this box and the nearest viewport, the
+/// viewport can scroll without repainting this box, so this box paints every child.
+///
+/// ## Hit-testing
+///
+/// This box only hit-tests the child whose vertical span contains the hit position,
+/// which it finds with a binary search, plus any child above it whose bottom edge is
+/// within a pixel of the hit position. A child is assumed to be hit only within its
+/// own bounds, as [RenderBox.hitTest] does.
+class RenderDocumentComponentColumn extends RenderFlex {
+  RenderDocumentComponentColumn({
+    super.textDirection,
+  }) : super(
+          direction: Axis.vertical,
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.center,
+        );
+
+  /// How far beyond the visible rect this box still paints children, to cover content
+  /// that paints a bit outside of its paint bounds, like a shadow, or a glyph's overhang.
+  static const paintCullingMargin = 100.0;
+
+  /// The number of times this box ran layout, which tells a cache of its children's
+  /// geometry when that cache is out of date.
+  int get layoutCount => _layoutCount;
+  int _layoutCount = 0;
+
+  /// The children, from top to bottom, for random access, or `null` if the children
+  /// changed since this list was last created.
+  List<RenderBox>? _childList;
+  List<RenderBox> get _children => _childList ??= getChildrenAsList();
+
+  /// The paint rects of the children whose paint rects aren't their layout rects, by
+  /// child index, or `null` if they haven't been read since the last layout.
+  Map<int, Rect>? _paintRectsOutsideOfLayout;
+
+  /// The farthest that any child paints above the top of its layout rect.
+  double _maxPaintExtentAboveLayout = 0;
+
+  /// The farthest that any child paints below the bottom of its layout rect.
+  double _maxPaintExtentBelowLayout = 0;
+
+  /// The child at [index], counting from the top.
+  ///
+  /// Every child is reported, including a child that isn't a document component.
+  RenderBox childAt(int index) => _children[index];
+
+  /// The layout rect of the child at [index], counting from the top, in this box's
+  /// coordinates.
+  ///
+  /// Every child is reported, including a child that isn't a document component.
+  Rect childRectAt(int index) {
+    final child = _children[index];
+    return (child.parentData! as FlexParentData).offset & child.size;
+  }
+
+  /// The rect that this box considers the child at [index] to paint in, counting from
+  /// the top, in this box's coordinates.
+  ///
+  /// See the class documentation for how a child's paint rect is found.
+  Rect childPaintRectAt(int index) {
+    _readPaintRects();
+    return _paintRectsOutsideOfLayout![index] ?? childRectAt(index);
+  }
+
+  @override
+  void insert(RenderBox child, {RenderBox? after}) {
+    super.insert(child, after: after);
+    _onChildrenChanged();
+  }
+
+  @override
+  void remove(RenderBox child) {
+    super.remove(child);
+    _onChildrenChanged();
+  }
+
+  @override
+  void removeAll() {
+    super.removeAll();
+    _onChildrenChanged();
+  }
+
+  @override
+  void move(RenderBox child, {RenderBox? after}) {
+    super.move(child, after: after);
+    _onChildrenChanged();
+  }
+
+  void _onChildrenChanged() {
+    _childList = null;
+    _paintRectsOutsideOfLayout = null;
+  }
+
+  @override
+  void performLayout() {
+    super.performLayout();
+
+    _layoutCount += 1;
+    _paintRectsOutsideOfLayout = null;
+  }
+
+  /// Whether the children are stacked from top to bottom, which the binary searches in
+  /// this box rely on, as they are with the configuration of a [_DocumentComponentColumn].
+  bool get _areChildrenStackedTopToBottom =>
+      direction == Axis.vertical && verticalDirection == VerticalDirection.down && spacing >= 0;
+
+  @override
+  bool hitTestChildren(BoxHitTestResult result, {required Offset position}) {
+    if (!_areChildrenStackedTopToBottom) {
+      return super.hitTestChildren(result, position: position);
+    }
+
+    // Only a child whose vertical span contains the position can be hit, and that's the
+    // last child that starts at, or above, the position. Check a child above it, too,
+    // when its bottom edge is within a pixel of the position, which can only matter
+    // when floating point rounding makes two children share a hairline, so that the
+    // children that are hit-tested, and their order, match those of a Column.
+    final children = _children;
+    for (int i = _lastChildStartingAtOrAbove(position.dy); i >= 0; i -= 1) {
+      final child = children[i];
+      final childParentData = child.parentData! as FlexParentData;
+      if (position.dy - (childParentData.offset.dy + child.size.height) > 1.0) {
+        // This child, and every child above it, ends above the position.
+        break;
+      }
+
+      final isHit = result.addWithPaintOffset(
+        offset: childParentData.offset,
+        position: position,
+        hitTest: (BoxHitTestResult result, Offset transformed) {
+          assert(transformed == position - childParentData.offset);
+          return child.hitTest(result, position: transformed);
+        },
+      );
+      if (isHit) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  @override
+  void defaultPaint(PaintingContext context, Offset offset) {
+    if (!_areChildrenStackedTopToBottom || firstChild == null) {
+      super.defaultPaint(context, offset);
+      return;
+    }
+
+    final visibleRect = _findVisibleRect(context, offset);
+    if (visibleRect == null) {
+      // We can't tell what's visible. Paint everything.
+      super.defaultPaint(context, offset);
+      return;
+    }
+    if (visibleRect.width < 0 || visibleRect.height < 0) {
+      // Nothing is visible.
+      return;
+    }
+
+    _readPaintRects();
+    final paintRectsOutsideOfLayout = _paintRectsOutsideOfLayout!;
+    final children = _children;
+
+    // A child whose layout rect ends above `searchTop`, or starts below `searchBottom`,
+    // can't paint in the visible rect.
+    final searchTop = visibleRect.top - _maxPaintExtentBelowLayout;
+    final searchBottom = visibleRect.bottom + _maxPaintExtentAboveLayout;
+    for (int i = _firstChildEndingAtOrBelow(searchTop); i < children.length; i += 1) {
+      final child = children[i];
+      final childOffset = (child.parentData! as FlexParentData).offset;
+      if (childOffset.dy > searchBottom) {
+        break;
+      }
+
+      final paintRect = paintRectsOutsideOfLayout[i] ?? childOffset & child.size;
+      if (paintRect.left <= visibleRect.right &&
+          paintRect.right >= visibleRect.left &&
+          paintRect.top <= visibleRect.bottom &&
+          paintRect.bottom >= visibleRect.top) {
+        context.paintChild(child, childOffset + offset);
+      }
+    }
+  }
+
+  /// Returns the rect, in this box's coordinates, in which painted children might be
+  /// seen, or `null` if this box can't tell, and should paint every child.
+  Rect? _findVisibleRect(PaintingContext context, Offset offset) {
+    if (isRepaintBoundary) {
+      // Our picture can be reused at another scroll offset without painting us again.
+      return null;
+    }
+
+    // Children can only be seen within the canvas clip.
+    Rect visibleRect = context.canvas.getLocalClipBounds().shift(-offset);
+
+    // ...and within the nearest viewport. We use the viewport's bounds, rather than the
+    // painting context's estimated bounds, because the estimated bounds aren't shifted
+    // by layers that move their children, like an OpacityLayer.
+    RenderObject? ancestor = parent;
+    while (ancestor != null && ancestor is! RenderAbstractViewport) {
+      if (ancestor.isRepaintBoundary) {
+        // This repaint boundary caches our picture, and the viewport can show that
+        // picture at another scroll offset, without painting us again. Paint everything.
+        return null;
+      }
+      ancestor = ancestor.parent;
+    }
+    if (ancestor is RenderBox && ancestor.hasSize) {
+      final viewportToLocal = Matrix4.tryInvert(getTransformTo(ancestor));
+      if (viewportToLocal == null) {
+        return null;
+      }
+      visibleRect = visibleRect.intersect(MatrixUtils.transformRect(viewportToLocal, Offset.zero & ancestor.size));
+    }
+
+    return visibleRect.inflate(paintCullingMargin);
+  }
+
+  /// Reads the paint rect of every child, and the farthest that any child paints outside
+  /// of its layout rect, if they haven't been read since the last layout.
+  void _readPaintRects() {
+    if (_paintRectsOutsideOfLayout != null) {
+      return;
+    }
+
+    final paintRectsOutsideOfLayout = <int, Rect>{};
+    double maxPaintExtentAboveLayout = 0;
+    double maxPaintExtentBelowLayout = 0;
+    final children = _children;
+    for (int i = 0; i < children.length; i += 1) {
+      final child = children[i];
+      final childOffset = (child.parentData! as FlexParentData).offset;
+      final layoutRect = childOffset & child.size;
+      final paintRect = _findPaintBounds(child).shift(childOffset);
+      if (paintRect != layoutRect) {
+        paintRectsOutsideOfLayout[i] = paintRect;
+        maxPaintExtentAboveLayout = max(maxPaintExtentAboveLayout, layoutRect.top - paintRect.top);
+        maxPaintExtentBelowLayout = max(maxPaintExtentBelowLayout, paintRect.bottom - layoutRect.bottom);
+      }
+    }
+
+    _paintRectsOutsideOfLayout = paintRectsOutsideOfLayout;
+    _maxPaintExtentAboveLayout = maxPaintExtentAboveLayout;
+    _maxPaintExtentBelowLayout = maxPaintExtentBelowLayout;
+  }
+
+  /// Returns the rect that [child] paints in, in the child's coordinates: its bounds,
+  /// expanded by its paint bounds, and by the paint bounds of the component inside the
+  /// boxes that [SingleColumnDocumentLayout] wraps around every component.
+  static Rect _findPaintBounds(RenderBox child) {
+    Rect paintBounds = (Offset.zero & child.size).expandToInclude(child.paintBounds);
+
+    // Walk through the ConstrainedBox, SizedBox, and Padding that wrap the component.
+    // Each of them paints its child where it laid the child out.
+    RenderBox box = child;
+    Offset boxOffset = Offset.zero;
+    while (true) {
+      final RenderBox? innerBox;
+      Offset innerBoxOffset = boxOffset;
+      if (box.runtimeType == RenderConstrainedBox) {
+        innerBox = (box as RenderConstrainedBox).child;
+      } else if (box.runtimeType == RenderPadding) {
+        innerBox = (box as RenderPadding).child;
+        if (innerBox != null) {
+          innerBoxOffset += (innerBox.parentData! as BoxParentData).offset;
+        }
+      } else {
+        break;
+      }
+      if (innerBox == null || !innerBox.hasSize) {
+        break;
+      }
+
+      paintBounds = paintBounds.expandToInclude(innerBox.paintBounds.shift(innerBoxOffset));
+      box = innerBox;
+      boxOffset = innerBoxOffset;
+    }
+
+    return paintBounds;
+  }
+
+  /// Returns the index of the last child whose top edge is at, or above, [dy], or `-1`.
+  int _lastChildStartingAtOrAbove(double dy) {
+    final children = _children;
+    int low = 0;
+    int high = children.length;
+    while (low < high) {
+      final middle = (low + high) >> 1;
+      if ((children[middle].parentData! as FlexParentData).offset.dy > dy) {
+        high = middle;
+      } else {
+        low = middle + 1;
+      }
+    }
+    return low - 1;
+  }
+
+  /// Returns the index of the first child whose bottom edge is at, or below, [dy], or the
+  /// number of children if there's none.
+  int _firstChildEndingAtOrBelow(double dy) {
+    final children = _children;
+    int low = 0;
+    int high = children.length;
+    while (low < high) {
+      final middle = (low + high) >> 1;
+      final child = children[middle];
+      if ((child.parentData! as FlexParentData).offset.dy + child.size.height >= dy) {
+        high = middle;
+      } else {
+        low = middle + 1;
+      }
+    }
+    return low;
   }
 }
