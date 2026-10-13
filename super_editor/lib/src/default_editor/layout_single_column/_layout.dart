@@ -102,9 +102,24 @@ class _SingleColumnDocumentLayoutState extends State<SingleColumnDocumentLayout>
   /// hold the same builders, even when the list itself is a new one.
   List<ComponentBuilder>? _componentBuilders;
 
+  /// The geometry of every component, which the position lookups search, or
+  /// `null` if it hasn't been computed since the components last changed.
+  _ComponentGeometry? _componentGeometry;
+
   // The key for the renderBox that contains the actual document layout.
   final GlobalKey _boxKey = GlobalKey();
   BuildContext get boxContext => _boxKey.currentContext!;
+
+  /// The render box that lays out, paints, and hit-tests the components, or `null`
+  /// if it isn't in the tree.
+  RenderDocumentComponentColumn? get _componentColumn {
+    final docBox = _boxKey.currentContext?.findRenderObject();
+    if (docBox is! RenderPadding) {
+      return null;
+    }
+    final column = docBox.child;
+    return column is RenderDocumentComponentColumn ? column : null;
+  }
 
   @override
   void initState() {
@@ -598,7 +613,106 @@ class _SingleColumnDocumentLayoutState extends State<SingleColumnDocumentLayout>
     return component.getDesiredCursorAtOffset(componentOffset);
   }
 
+  /// Returns the key of the first component, in top-to-bottom order, whose bounds contain
+  /// the given [documentOffset], or `null` if no component contains it.
+  ///
+  /// The result is always the one that [_findComponentAtOffsetByLinearScan] returns, but
+  /// this method searches the components' geometry with a binary search.
   GlobalKey? _findComponentAtOffset(Offset documentOffset) {
+    final geometry = _obtainComponentGeometry();
+    if (geometry == null) {
+      return _findComponentAtOffsetByLinearScan(documentOffset);
+    }
+
+    final index = geometry.findIndexOfFirstComponentContaining(documentOffset);
+    final componentKey = index >= 0 ? geometry.componentKeys[index] : null;
+    assert(
+      identical(componentKey, _findComponentAtOffsetByLinearScan(documentOffset)),
+      "The binary search for the component at $documentOffset disagrees with the linear scan.",
+    );
+    return componentKey;
+  }
+
+  /// Returns the key of the first component, in top-to-bottom order, whose bounds contain
+  /// the given [documentOffset], or else the key of the first component at the smallest
+  /// vertical distance from [documentOffset].
+  ///
+  /// The result is always the one that [_findComponentClosestToOffsetByLinearScan] returns,
+  /// but this method searches the components' geometry with a binary search.
+  GlobalKey? _findComponentClosestToOffset(Offset documentOffset) {
+    final geometry = _obtainComponentGeometry();
+    if (geometry == null) {
+      return _findComponentClosestToOffsetByLinearScan(documentOffset);
+    }
+
+    final index = geometry.findIndexOfComponentClosestTo(documentOffset);
+    final componentKey = index >= 0 ? geometry.componentKeys[index] : null;
+    assert(
+      identical(componentKey, _findComponentClosestToOffsetByLinearScan(documentOffset)),
+      "The binary search for the component closest to $documentOffset disagrees with the linear scan.",
+    );
+    return componentKey;
+  }
+
+  /// Returns the geometry of every component, which is computed once, and then reused
+  /// until the components are rebuilt or re-laid out, or `null` if the position lookups
+  /// should scan the components instead.
+  ///
+  /// The geometry is the bounds of each component's render box, in this layout's
+  /// coordinates, including any paint transform between the component and this layout,
+  /// as the linear scans compute them. It's reused until this layout rebuilds its
+  /// components, or the column of components runs layout, or moves, so a component that
+  /// moves its content with a paint transform must change that transform only in a
+  /// layout. In debug builds, every lookup checks its answer against the linear scan.
+  _ComponentGeometry? _obtainComponentGeometry() {
+    if (debugSingleColumnLayoutUseLinearLookups) {
+      return null;
+    }
+
+    final docBox = _boxKey.currentContext?.findRenderObject();
+    final column = _componentColumn;
+    if (docBox is! RenderBox || column == null || !column.hasSize) {
+      return null;
+    }
+    final columnOffset = (column.parentData! as BoxParentData).offset;
+
+    final cachedGeometry = _componentGeometry;
+    if (cachedGeometry != null &&
+        identical(cachedGeometry.documentBox, docBox) &&
+        identical(cachedGeometry.column, column) &&
+        cachedGeometry.columnLayoutCount == column.layoutCount &&
+        cachedGeometry.columnOffset == columnOffset) {
+      return cachedGeometry;
+    }
+
+    // Compute the bounds of every component exactly as the linear scans do, and in
+    // the same order, skipping the same components.
+    final componentKeys = <GlobalKey>[];
+    final componentBounds = <Rect>[];
+    for (final componentKey in _nodeIdsToComponentKeys.values) {
+      if (componentKey.currentState is! DocumentComponent) {
+        continue;
+      }
+      final componentBox = componentKey.currentContext?.findRenderObject();
+      if (componentBox is! RenderBox) {
+        continue;
+      }
+
+      componentKeys.add(componentKey);
+      componentBounds.add(componentBox.localToGlobal(Offset.zero, ancestor: docBox) & componentBox.size);
+    }
+
+    return _componentGeometry = _ComponentGeometry(
+      documentBox: docBox,
+      column: column,
+      columnLayoutCount: column.layoutCount,
+      columnOffset: columnOffset,
+      componentKeys: componentKeys,
+      componentBounds: componentBounds,
+    );
+  }
+
+  GlobalKey? _findComponentAtOffsetByLinearScan(Offset documentOffset) {
     for (final componentKey in _nodeIdsToComponentKeys.values) {
       if (componentKey.currentState is! DocumentComponent) {
         continue;
@@ -615,7 +729,7 @@ class _SingleColumnDocumentLayoutState extends State<SingleColumnDocumentLayout>
     return null;
   }
 
-  GlobalKey? _findComponentClosestToOffset(Offset documentOffset) {
+  GlobalKey? _findComponentClosestToOffsetByLinearScan(Offset documentOffset) {
     GlobalKey? nearestComponentKey;
     double nearestDistance = double.infinity;
     for (final componentKey in _nodeIdsToComponentKeys.values) {
@@ -799,6 +913,7 @@ class _SingleColumnDocumentLayoutState extends State<SingleColumnDocumentLayout>
     final newComponentKeys = <String, GlobalKey>{};
     final newNodeIds = <GlobalKey, String>{};
     _topToBottomComponentKeys.clear();
+    _componentGeometry = null;
 
     // Keep the same list of component builders while the builders are the same, so
     // that the builder widgets below can be reused.
@@ -959,13 +1074,24 @@ class _SingleColumnDocumentLayoutState extends State<SingleColumnDocumentLayout>
   }
 
   /// Gets the component bounds of the component at [componentIndex] from top to bottom order.
+  ///
+  /// A node that doesn't have a component's render box, yet, reports the bounds of its
+  /// child in the column of components, which every node has.
   Rect _getComponentBoundsByIndex(int componentIndex) {
+    final docBox = boxContext.findRenderObject() as RenderBox;
     final componentKey = _topToBottomComponentKeys[componentIndex];
-    final component = componentKey.currentState as DocumentComponent;
+    final componentBox = componentKey.currentContext?.findRenderObject();
+    if (componentBox is RenderBox && componentBox.hasSize) {
+      final contentOffset = componentBox.localToGlobal(Offset.zero, ancestor: docBox);
+      return contentOffset & componentBox.size;
+    }
 
-    final componentBox = component.context.findRenderObject() as RenderBox;
-    final contentOffset = componentBox.localToGlobal(Offset.zero, ancestor: boxContext.findRenderObject());
-    return contentOffset & componentBox.size;
+    final column = _componentColumn;
+    if (column == null || componentIndex >= column.childCount) {
+      return Rect.zero;
+    }
+    final columnOffset = (column.parentData! as BoxParentData).offset;
+    return column.childRectAt(componentIndex).shift(columnOffset);
   }
 }
 
@@ -1230,6 +1356,171 @@ class _Component extends StatelessWidget {
       ),
       child: component,
     );
+  }
+}
+
+/// Whether a [SingleColumnDocumentLayout] finds the component at, or nearest to, an
+/// offset by scanning every component, instead of with a binary search over the
+/// components' bounds.
+///
+/// Both always find the same component. Tests use this to compare them.
+@visibleForTesting
+bool debugSingleColumnLayoutUseLinearLookups = false;
+
+/// The bounds of the components in a [SingleColumnDocumentLayout], in the layout's
+/// coordinates, in the order that the layout's linear lookups scan them, which is top
+/// to bottom, which the position lookups search.
+///
+/// The bounds are sorted by their top edges in most documents, but they don't have to
+/// be. For example, an app might paint some components side by side with a paint
+/// transform. The searches below don't assume that the bounds are sorted, or that they
+/// don't overlap. Instead, they bound the search with the largest bottom edge of every
+/// prefix of the components, and the smallest top edge of every suffix, which are
+/// both sorted, and then check every component in between. In a document whose
+/// components are stacked, that's the one or two components at the offset.
+class _ComponentGeometry {
+  _ComponentGeometry({
+    required this.documentBox,
+    required this.column,
+    required this.columnLayoutCount,
+    required this.columnOffset,
+    required this.componentKeys,
+    required this.componentBounds,
+  })  : _maxBottomUpTo = Float64List(componentBounds.length),
+        _minTopFrom = Float64List(componentBounds.length) {
+    for (int i = 0; i < componentBounds.length; i += 1) {
+      final bottom = componentBounds[i].bottom;
+      _maxBottomUpTo[i] = i == 0 ? bottom : max(_maxBottomUpTo[i - 1], bottom);
+    }
+    for (int i = componentBounds.length - 1; i >= 0; i -= 1) {
+      final top = componentBounds[i].top;
+      _minTopFrom[i] = i == componentBounds.length - 1 ? top : min(_minTopFrom[i + 1], top);
+    }
+  }
+
+  /// The layout's box, which [componentBounds] are relative to.
+  final RenderBox documentBox;
+
+  /// The column of components, and its layout count and offset, when this geometry was
+  /// computed. The geometry is out of date when any of them changes.
+  final RenderDocumentComponentColumn column;
+  final int columnLayoutCount;
+  final Offset columnOffset;
+
+  /// The keys of the components, in the order of the layout's linear lookups.
+  final List<GlobalKey> componentKeys;
+
+  /// The bounds of each component in [componentKeys], in [documentBox]'s coordinates.
+  final List<Rect> componentBounds;
+
+  /// The largest bottom edge among the components from the first one to each index.
+  final Float64List _maxBottomUpTo;
+
+  /// The smallest top edge among the components from each index to the last one.
+  final Float64List _minTopFrom;
+
+  int get length => componentBounds.length;
+
+  /// Returns the index of the first component whose bounds contain [offset], or `-1`.
+  int findIndexOfFirstComponentContaining(Offset offset) {
+    final dy = offset.dy;
+
+    // A component contains the offset only if its top <= dy < its bottom. Every
+    // component before `start` ends at, or above, dy, and every component after
+    // `end` starts below dy.
+    final start = _firstIndexWhere((i) => _maxBottomUpTo[i] > dy);
+    final end = _firstIndexWhere((i) => _minTopFrom[i] > dy) - 1;
+    for (int i = start; i <= end; i += 1) {
+      if (componentBounds[i].contains(offset)) {
+        return i;
+      }
+    }
+    return -1;
+  }
+
+  /// Returns the index of the first component whose bounds contain [offset], or else the
+  /// index of the first component at the smallest vertical distance from [offset], or `-1`
+  /// if there are no components.
+  int findIndexOfComponentClosestTo(Offset offset) {
+    if (length == 0) {
+      return -1;
+    }
+
+    final containingIndex = findIndexOfFirstComponentContaining(offset);
+    if (containingIndex >= 0) {
+      return containingIndex;
+    }
+
+    final dy = offset.dy;
+    int closestIndex = -1;
+    double closestDistance = double.infinity;
+    void consider(int index) {
+      final distance = _verticalDistance(componentBounds[index], dy);
+      if (distance < closestDistance || (distance == closestDistance && index < closestIndex)) {
+        closestDistance = distance;
+        closestIndex = index;
+      }
+    }
+
+    // A component is at distance 0 when its top <= dy <= its bottom. Every component
+    // before `start` ends above dy, and every component after `end` starts below dy.
+    final start = _firstIndexWhere((i) => _maxBottomUpTo[i] >= dy);
+    final end = _firstIndexWhere((i) => _minTopFrom[i] > dy) - 1;
+
+    if (start > 0) {
+      // Of the components that end above dy, the closest are the ones with the largest
+      // bottom edge. The first of them is the first one where the largest bottom edge
+      // so far reaches that distance.
+      final smallestDistance = dy - _maxBottomUpTo[start - 1];
+      consider(_firstIndexWhere((i) => dy - _maxBottomUpTo[i] <= smallestDistance));
+    }
+
+    for (int i = start; i <= end; i += 1) {
+      consider(i);
+    }
+
+    if (end + 1 < length) {
+      // Of the components that start below dy, the closest are the ones with the
+      // smallest top edge. Find the first of them.
+      final smallestDistance = _minTopFrom[end + 1] - dy;
+      for (int i = end + 1; i < length; i += 1) {
+        if (componentBounds[i].top - dy <= smallestDistance) {
+          consider(i);
+          break;
+        }
+      }
+    }
+
+    return closestIndex;
+  }
+
+  /// Returns the first index for which [test] is `true`, or [length] if there's none,
+  /// given a [test] that's `false` for every index before some index, and `true` for
+  /// every index from there on.
+  int _firstIndexWhere(bool Function(int index) test) {
+    int low = 0;
+    int high = length;
+    while (low < high) {
+      final middle = (low + high) >> 1;
+      if (test(middle)) {
+        high = middle;
+      } else {
+        low = middle + 1;
+      }
+    }
+    return low;
+  }
+
+  /// The vertical distance between [dy] and [bounds], computed exactly as the linear scan
+  /// computes it.
+  static double _verticalDistance(Rect bounds, double dy) {
+    if (dy < bounds.top) {
+      return bounds.top - dy;
+    } else if (dy > bounds.bottom) {
+      return dy - bounds.bottom;
+    } else {
+      return 0;
+    }
   }
 }
 

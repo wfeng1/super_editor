@@ -320,6 +320,68 @@ void main() {
         }
       });
     });
+
+    group("finds the component at an offset", () {
+      testWidgets("as a linear scan does, when components sit side by side", (tester) async {
+        final document = _createParagraphs(40);
+        // Paint the components in pairs, side by side, the way an app's columns might,
+        // and shift a few of them farther, so that their bounds overlap, and aren't sorted
+        // by their top edges.
+        final shifts = <String, Offset>{
+          for (int i = 1; i < 40; i += 2) "$i": const Offset(260, -30),
+          "8": const Offset(40, -95),
+          "21": const Offset(-80, 45),
+          "30": const Offset(0, -400),
+        };
+        await tester //
+            .createDocument()
+            .withCustomContent(document)
+            .withEditorSize(const Size(600, 4000))
+            .withComponentBuilders([
+          _PaintProbeComponentBuilder([], shifts: shifts),
+          ...defaultComponentBuilders,
+        ]).pump();
+
+        final layout = SuperEditorInspector.findDocumentLayout();
+
+        // Make sure that the component bounds really aren't sorted.
+        final componentTops = [
+          for (int i = 0; i < 40; i += 1)
+            (layout.getComponentByNodeId("$i")!.context.findRenderObject() as RenderBox).localToGlobal(Offset.zero).dy,
+        ];
+        expect(
+          [for (int i = 1; i < componentTops.length; i += 1) componentTops[i] < componentTops[i - 1]],
+          contains(true),
+        );
+
+        // The layout's offsets are relative to the box around the column of components.
+        final layoutSize = (_findComponentColumn(tester).parent! as RenderBox).size;
+
+        int comparisons = 0;
+        for (double y = -60; y < layoutSize.height + 60; y += 2.5) {
+          for (final x in [-20.0, 0.0, 10.0, 100.0, 250.0, 290.0, 400.0, 599.0, 700.0, 900.0]) {
+            final offset = Offset(x, y);
+
+            debugSingleColumnLayoutUseLinearLookups = false;
+            final atOffset = layout.getDocumentPositionAtOffset(offset);
+            final nearestToOffset = layout.getDocumentPositionNearestToOffset(offset);
+            final cursor = layout.getDesiredCursorAtOffset(offset);
+
+            debugSingleColumnLayoutUseLinearLookups = true;
+            final linearAtOffset = layout.getDocumentPositionAtOffset(offset);
+            final linearNearestToOffset = layout.getDocumentPositionNearestToOffset(offset);
+            final linearCursor = layout.getDesiredCursorAtOffset(offset);
+            debugSingleColumnLayoutUseLinearLookups = false;
+
+            expect(atOffset, linearAtOffset, reason: "getDocumentPositionAtOffset($offset)");
+            expect(nearestToOffset, linearNearestToOffset, reason: "getDocumentPositionNearestToOffset($offset)");
+            expect(cursor, linearCursor, reason: "getDesiredCursorAtOffset($offset)");
+            comparisons += 1;
+          }
+        }
+        expect(comparisons, greaterThan(1000));
+      });
+    });
   });
 }
 
