@@ -2153,6 +2153,13 @@ class RenderDocumentComponentColumn extends RenderFlex {
       return null;
     }
 
+    if (context.runtimeType != PaintingContext) {
+      // A painting context that isn't the framework's own, like flutter_test's recording
+      // context behind the `paints` matcher, may have a canvas that can't report its clip.
+      // Paint everything.
+      return null;
+    }
+
     // Children can only be seen within the canvas clip.
     Rect visibleRect = context.canvas.getLocalClipBounds().shift(-offset);
 

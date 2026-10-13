@@ -227,6 +227,32 @@ void main() {
         await tester.pump(kDoubleTapTimeout);
       });
 
+      testWidgets("every component for a painting context that can't report its clip", (tester) async {
+        final scrollController = ScrollController();
+        addTearDown(scrollController.dispose);
+        final painted = <String>[];
+        final document = _createParagraphs(150);
+
+        await _pumpEditorInCustomScrollView(
+          tester,
+          document: document,
+          scrollController: scrollController,
+          componentBuilders: [
+            _PaintProbeComponentBuilder(painted),
+            ...defaultComponentBuilders,
+          ],
+        );
+        painted.clear();
+
+        // flutter_test's `paints` matcher paints with a recording context whose canvas can't
+        // report its clip.
+        expect(_findComponentColumn(tester), paints..paragraph());
+        expect(painted.toSet(), hasLength(document.nodeCount));
+
+        // Let the editor's tap timers expire.
+        await tester.pump(kDoubleTapTimeout);
+      });
+
       testWidgets("a component that paints outside of its layout rect when that paint is visible", (tester) async {
         final scrollController = ScrollController();
         addTearDown(scrollController.dispose);
