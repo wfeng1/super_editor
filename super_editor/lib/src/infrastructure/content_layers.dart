@@ -2,7 +2,6 @@ import 'dart:collection';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
-import 'package:flutter/scheduler.dart';
 import 'package:super_editor/src/infrastructure/_logging.dart';
 
 /// Widget that displays [content] above a number of [underlays], and beneath a number of
@@ -51,6 +50,11 @@ abstract class ContentLayers extends RenderObjectWidget {
 
   /// The primary content displayed in this widget, which determines the size and location
   /// of all [underlays] and [overlays].
+  ///
+  /// The content should call `onBuildScheduled` whenever it schedules a build of itself,
+  /// e.g., with `setState()`. [ContentLayers] then rebuilds the layers after the content's
+  /// next layout, and a layer that's dirty in the meantime waits for that, instead of
+  /// building against the content's outdated layout.
   final Widget Function(VoidCallback onBuildScheduled) content;
 
   /// Layers displayed above the [content].
@@ -74,37 +78,6 @@ abstract class ContentLayers extends RenderObjectWidget {
 ///
 /// Must have a [renderObject] of type [RenderContentLayers].
 class ContentLayersElement extends RenderObjectElement {
-  /// The real Flutter framework `onBuildScheduled` callback.
-  ///
-  /// This property is non-null when one or more [ContentLayersElement]s are in the
-  /// tree, and `null` otherwise.
-  ///
-  /// This callback is held statically, rather than per-instance, because Flutter
-  /// might activate a new [ContentLayersElement] before deactivating an old
-  /// [ContentLayersElement], or there might be multiple [ContentLayersElement]s
-  /// in the tree. In these cases, we can't consistently replace Flutter's
-  /// `onBuildScheduled` callback without losing the original callback.
-  static VoidCallback? _realOnBuildScheduled;
-
-  /// Listeners that are registered by [ContentLayersElement]s to find out when
-  /// the Flutter framework schedules builds, so that [ContentLayerElement]s can
-  /// manage their layers to avoid invalid build timing.
-  static final _onBuildListeners = <VoidCallback>{};
-
-  /// The Flutter framework has scheduled a build by calling `onBuildScheduled`
-  /// on a [BuildOwner].
-  ///
-  /// This global static method calls build schedule listeners on all instances
-  /// of [ContentLayersElement], which registered a listener with [_onBuildListeners].
-  static void _globalOnBuildScheduled() {
-    // Call the real Flutter onBuildScheduled callback so Flutter works as expected.
-    _realOnBuildScheduled!();
-
-    for (final listener in _onBuildListeners) {
-      listener();
-    }
-  }
-
   ContentLayersElement(ContentLayers widget) : super(widget);
 
   List<Element> _underlays = <Element>[];
@@ -127,14 +100,6 @@ class ContentLayersElement extends RenderObjectElement {
   void mount(Element? parent, Object? newSlot) {
     contentLayersLog.fine("ContentLayersElement - mounting");
     super.mount(parent, newSlot);
-
-    // Intercept calls to the BuildOwner's onBuildScheduled so that we can hijack an
-    // opportunity to check our subtrees for dirty elements before they rebuild.
-    if (_realOnBuildScheduled == null) {
-      _realOnBuildScheduled = owner!.onBuildScheduled!;
-      owner!.onBuildScheduled = _globalOnBuildScheduled;
-      _onBuildListeners.add(_onBuildScheduled);
-    }
 
     _content = inflateWidget(widget.content(_onContentBuildScheduled), contentSlot);
   }
@@ -166,109 +131,24 @@ class ContentLayersElement extends RenderObjectElement {
   @override
   void unmount() {
     contentLayersLog.fine("ContentLayersElement - unmounting");
-
-    // Remove our intercepting onBuildScheduled callback.
-    _onBuildListeners.remove(_onBuildScheduled);
-    if (_onBuildListeners.isEmpty) {
-      owner!.onBuildScheduled = _realOnBuildScheduled;
-    }
-
     super.unmount();
   }
 
-  void _onBuildScheduled() {
-    contentLayersLog.finer("ON BUILD SCHEDULED");
-
-    // Schedule a callback to run at the beginning of the next frame so we can check
-    // for dirty subtrees.
-    //
-    // If the content is dirty, but the layers are clean, then the layers won't attempt
-    // to rebuild, and we can let Flutter build the content whenever it wants.
-    //
-    // If a layer is dirty, but the content is clean, then the content layout is still
-    // valid, and we can let Flutter build the layer whenever it wants.
-    //
-    // However, if both the content and at least one layer are both dirty, then we must
-    // make absolutely sure that the content builds first. To do this, we deactivate the
-    // layer Elements, preventing Flutter from rebuilding them, and then we reactivate
-    // the layers during the next layout pass, after the content is laid out.
-    SchedulerBinding.instance.scheduleFrameCallback((timeStamp) {
-      contentLayersLog.finer("SCHEDULED FRAME CALLBACK");
-      if (!mounted) {
-        contentLayersLog.finer("We've unmounted since the end of the frame. Fizzling.");
-        return;
-      }
-
-      final isContentDirty = _isContentDirty();
-      final isAnyLayerDirty = _isAnyLayerDirty();
-
-      if (isContentDirty && isAnyLayerDirty) {
-        contentLayersLog.fine("Marking needs build because content and at least one layer are both dirty.");
-        _temporarilyForgetLayers();
-      }
-    });
-  }
-
-  bool _isContentDirty() => _isSubtreeDirty(_content!);
-
-  bool _isAnyLayerDirty() {
-    contentLayersLog.finer("Checking if any layer is dirty");
-    bool hasDirtyElements = false;
-
-    contentLayersLog.finer("Checking underlays");
-    for (final underlay in _underlays) {
-      contentLayersLog.finer(() => " - Is underlay ($underlay) subtree dirty? ${_isSubtreeDirty(underlay)}");
-      hasDirtyElements = hasDirtyElements || _isSubtreeDirty(underlay);
-    }
-
-    contentLayersLog.finer("Checking overlays");
-    for (final overlay in _overlays) {
-      contentLayersLog.finer(() => " - Is overlay ($overlay) subtree dirty? ${_isSubtreeDirty(overlay)}");
-      hasDirtyElements = hasDirtyElements || _isSubtreeDirty(overlay);
-    }
-
-    return hasDirtyElements;
-  }
-
-  static bool _isDirty = false;
-
-  bool _isSubtreeDirty(Element element) {
-    _isDirty = false;
-    element.visitChildren(_isSubtreeDirtyVisitor);
-    return _isDirty;
-  }
-
-// This is intentionally static to prevent closure allocation during
-  // the traversal of the element tree.
-  static void _isSubtreeDirtyVisitor(Element element) {
-    if (_isDirty) {
-      // We already found a dirty element. Stop looking. Flutter still calls this
-      // visitor for the remaining siblings, but we no longer descend into them.
-      return;
-    }
-
-    // Can't use the () => message syntax because it allocates a closure.
-    assert(() {
-      if (contentLayersLog.isLoggable(Level.FINEST)) {
-        contentLayersLog.finest("Finding dirty children for: $element");
-      }
-      return true;
-    }());
-    if (element.dirty) {
-      assert(() {
-        if (contentLayersLog.isLoggable(Level.FINEST)) {
-          contentLayersLog.finest("Found a dirty child: $element");
-        }
-        return true;
-      }());
-      _isDirty = true;
-      return;
-    }
-    element.visitChildren(_isSubtreeDirtyVisitor);
-  }
-
+  /// The content scheduled a build of itself.
+  ///
+  /// The content's layout might change, so mark our render object as needing layout,
+  /// which rebuilds the layers after the content's next layout. Until then, a layer
+  /// that's dirty keeps what it last built, rather than building against the content's
+  /// outdated layout. See [ContentLayerState.build].
+  ///
+  /// This used to temporarily "forget" the layers, with [forgetChild], which stopped
+  /// them from building during the build phase in older versions of Flutter, but
+  /// [forgetChild] does nothing outside of debug builds anymore.
   void _onContentBuildScheduled() {
-    _temporarilyForgetLayers();
+    if (!mounted || !renderObject.attached) {
+      return;
+    }
+    renderObject.markNeedsLayout();
   }
 
   @override
@@ -288,6 +168,7 @@ class ContentLayersElement extends RenderObjectElement {
       } else {
         child = super.updateChild(_underlays[i], widget.underlays[i](this), UnderlaySlot(i))!;
       }
+      _rebuildIfBuildWasDeferred(child);
       underlays[i] = child;
     }
     _underlays = underlays;
@@ -300,9 +181,22 @@ class ContentLayersElement extends RenderObjectElement {
       } else {
         child = super.updateChild(_overlays[i], widget.overlays[i](this), OverlaySlot(i))!;
       }
+      _rebuildIfBuildWasDeferred(child);
       overlays[i] = child;
     }
     _overlays = overlays;
+  }
+
+  /// Rebuilds the given [layer] if it deferred a build until the layers are built, and
+  /// [updateChild] didn't rebuild it, which happens when a layer builder returns the
+  /// same widget instance as before.
+  void _rebuildIfBuildWasDeferred(Element layer) {
+    if (layer is ContentLayerStatefulElement) {
+      final state = layer.state;
+      if (state is ContentLayerState && state._isBuildDeferredToLayout) {
+        layer.rebuild(force: true);
+      }
+    }
   }
 
   @override
@@ -312,31 +206,6 @@ class ContentLayersElement extends RenderObjectElement {
     assert(_debugCheckHasAssociatedRenderObject(newChild));
 
     return newChild;
-  }
-
-  /// Forgets the overlay and underlay children so that they don't run build at a
-  /// problematic time, but the same layers can be brought back later, with retained
-  /// `Element` and `State` objects.
-  ///
-  /// Note: If the layers are deactivated, rather than forgotten, new `Element`s and
-  /// `State`s will be created on every build, which prevents layer `State` objects
-  /// from retaining information across builds, thus defeating the purpose of using
-  /// a `StatefulWidget`.
-  void _temporarilyForgetLayers() {
-    contentLayersLog.finer("ContentLayersElement - temporarily forgetting layers");
-    for (final underlay in _underlays) {
-      // Calling super.forgetChild directly to avoid adding it to _forgottenChildren.
-      // We're doing this to prevent the children from building, but not from
-      // being enumerated in visitChildren, which would happen with this.forgetChild.
-      super.forgetChild(underlay);
-    }
-
-    for (final overlay in _overlays) {
-      // Calling super.forgetChild directly to avoid adding it to _forgottenChildren.
-      // We're doing this to prevent the children from building, but not from
-      // being enumerated in visitChildren, which would happen with this.forgetChild.
-      super.forgetChild(overlay);
-    }
   }
 
   @override
@@ -702,6 +571,13 @@ abstract class ContentLayerState<WidgetType extends ContentLayerStatefulWidget, 
   LayoutDataType? get layoutData => _layoutData;
   LayoutDataType? _layoutData;
 
+  /// The subtree that [doBuild] returned last.
+  Widget? _builtSubtree;
+
+  /// Whether this layer skipped a build because the ancestor [ContentLayers] is about to
+  /// rebuild every layer, after the content's next layout.
+  bool _isBuildDeferredToLayout = false;
+
   /// Traditional build method for this widget - this method should not be overridden
   /// in subclasses.
   @override
@@ -710,11 +586,29 @@ abstract class ContentLayerState<WidgetType extends ContentLayerStatefulWidget, 
     final contentElement = contentLayers?._content;
     final contentLayout = contentElement?.findRenderObject();
 
+    final builtSubtree = _builtSubtree;
+    if (contentLayers != null && contentLayers.renderObject.contentNeedsLayout && builtSubtree != null) {
+      // The content needs layout, and ContentLayers builds every layer again after the
+      // content's layout. Build there, against the new content layout, rather than now,
+      // against the old one, and keep what this layer built last until then.
+      _isBuildDeferredToLayout = true;
+      return builtSubtree;
+    }
+    _isBuildDeferredToLayout = false;
+
     if (contentLayers != null && !contentLayers.renderObject.contentNeedsLayout) {
       _layoutData = computeLayoutData(contentElement, contentLayout);
     }
 
-    return doBuild(context, _layoutData);
+    return _builtSubtree = doBuild(context, _layoutData);
+  }
+
+  @override
+  void reassemble() {
+    super.reassemble();
+
+    // Build again after a hot reload.
+    _builtSubtree = null;
   }
 
   /// Computes and returns cached layout data, derived from the content layer's [Element]

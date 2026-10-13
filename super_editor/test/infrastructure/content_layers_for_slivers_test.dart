@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -238,6 +239,77 @@ void main() {
       expect(underlay.layouts, 1);
     });
   });
+
+  group("ContentLayers", () {
+    testWidgets("builds a layer that's dirty while the content rebuilds once, after the content's layout",
+        (tester) async {
+      final contentHeight = ValueNotifier<double>(5000);
+      addTearDown(contentHeight.dispose);
+      final overlay = _LayerProbe("overlay");
+
+      await _pumpLayers(
+        tester,
+        content: (onBuildScheduled) => _ResizableContent(
+          height: contentHeight,
+          onBuildScheduled: onBuildScheduled,
+        ),
+        overlay: overlay,
+      );
+      expect(overlay.builds, 1);
+
+      // Make the layer, and the content, dirty in the same frame, in both orders.
+      overlay.state!.setLabelSuffix(" 1");
+      contentHeight.value = 6000;
+      await tester.pump();
+
+      expect(overlay.builds, 2);
+      expect(overlay.computedContentHeights, [5000, 6000]);
+      expect(find.text("overlay 1"), findsOneWidget);
+
+      contentHeight.value = 7000;
+      overlay.state!.setLabelSuffix(" 2");
+      await tester.pump();
+
+      expect(overlay.builds, 3);
+      expect(overlay.computedContentHeights, [5000, 6000, 7000]);
+      expect(find.text("overlay 2"), findsOneWidget);
+    });
+
+    testWidgets("rebuilds a layer that waited for the content's layout, when its builder returns the same widget",
+        (tester) async {
+      final overlay = _LayerProbe("overlay", reuseWidget: true);
+
+      await _pumpLayers(
+        tester,
+        content: (_) => SliverToBoxAdapter(child: SizedBox(key: _contentBoxKey, height: 5000)),
+        overlay: overlay,
+      );
+      expect(overlay.builds, 1);
+
+      final renderLayers = tester.renderObject<RenderSliverContentLayers>(find.byType(SliverContentLayers));
+      renderLayers.markNeedsLayout();
+      overlay.state!.setLabelSuffix(" - updated");
+      await tester.pump();
+
+      // The layer's own build waited for the layout, where ContentLayers called the layer's
+      // builder, which returned the same widget, so ContentLayers rebuilt the layer itself.
+      expect(overlay.builderCalls, 2);
+      expect(overlay.builds, 2);
+      expect(find.text("overlay - updated"), findsOneWidget);
+    });
+
+    testWidgets("doesn't replace the build owner's onBuildScheduled callback", (tester) async {
+      final onBuildScheduled = tester.binding.buildOwner!.onBuildScheduled;
+
+      await _pumpLayers(
+        tester,
+        content: (_) => SliverToBoxAdapter(child: SizedBox(key: _contentBoxKey, height: 5000)),
+        overlay: _LayerProbe("overlay"),
+      );
+
+      expect(tester.binding.buildOwner!.onBuildScheduled, same(onBuildScheduled));
+    });
+  });
 }
 
 const _windowWidth = 600.0;
@@ -279,9 +351,13 @@ Future<void> _pumpLayers(
 /// Records how often ContentLayers calls a layer's builder, how often the layer
 /// builds, and how often the layer is laid out.
 class _LayerProbe {
-  _LayerProbe(this.label);
+  _LayerProbe(this.label, {this.reuseWidget = false});
 
   final String label;
+
+  /// Whether [builder] returns the same widget instance every time.
+  final bool reuseWidget;
+  late final _ProbeLayer _widget = _ProbeLayer(this);
 
   int builderCalls = 0;
   int builds = 0;
@@ -296,7 +372,48 @@ class _LayerProbe {
 
   ContentLayerWidget builder(BuildContext context) {
     builderCalls += 1;
-    return _ProbeLayer(this);
+    return reuseWidget ? _widget : _ProbeLayer(this);
+  }
+}
+
+/// Sliver content whose height follows [height], which tells [ContentLayers] when it
+/// schedules a build.
+class _ResizableContent extends StatefulWidget {
+  const _ResizableContent({
+    required this.height,
+    required this.onBuildScheduled,
+  });
+
+  final ValueListenable<double> height;
+  final VoidCallback onBuildScheduled;
+
+  @override
+  State<_ResizableContent> createState() => _ResizableContentState();
+}
+
+class _ResizableContentState extends State<_ResizableContent> {
+  @override
+  void initState() {
+    super.initState();
+    widget.height.addListener(_onHeightChange);
+  }
+
+  @override
+  void dispose() {
+    widget.height.removeListener(_onHeightChange);
+    super.dispose();
+  }
+
+  void _onHeightChange() {
+    setState(() {});
+    widget.onBuildScheduled();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return SliverToBoxAdapter(
+      child: SizedBox(key: _contentBoxKey, height: widget.height.value),
+    );
   }
 }
 
