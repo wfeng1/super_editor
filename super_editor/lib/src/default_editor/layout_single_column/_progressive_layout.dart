@@ -257,9 +257,12 @@ class _ProgressiveAnchor {
 /// of the frames that build them.
 ///
 /// Every node that isn't built is in [_deferred]. Its component builder builds a
-/// [_ComponentPlaceholder] instead of its component. The nodes are built during the layout
-/// of the layout's [_RenderSliverProgressiveAdapter], in a layout callback, so that the
-/// frame that builds them lays them out, and paints them.
+/// [_ComponentSlot] without a child, which is a placeholder of the component's estimated
+/// size. The nodes are built during the layout of the layout's
+/// [_RenderSliverProgressiveAdapter], in a layout callback, so that the frame that builds
+/// them lays them out, and paints them. Building a node gives its slot the node's
+/// component, so the column of components keeps its children, and lays out only the slots
+/// that changed.
 class _ProgressiveFill {
   _ProgressiveFill({
     required _SingleColumnDocumentLayoutState layout,
@@ -577,7 +580,7 @@ class _ProgressiveFill {
       if (column == null || !_canReadLastLayoutOf(column)) {
         return null;
       }
-      // Read the column's children before building, which replaces some of them.
+      // Read the column's children before building, which changes the sizes of some.
       final columnTop = _columnTopInSliver(column);
       final visibleTop = constraints.scrollOffset - columnTop;
       final visibleBottom = visibleTop + constraints.remainingPaintExtent;
@@ -708,12 +711,16 @@ class _ProgressiveFill {
       if (rect.top >= visibleBottom) {
         break;
       }
-      if (column.childAt(index) is! _RenderComponentPlaceholder) {
+      if (!_isPlaceholder(column.childAt(index))) {
         return _ProgressiveAnchor(index, columnTop + rect.top);
       }
     }
     return _ProgressiveAnchor(firstVisibleIndex, columnTop + column.childRectAt(firstVisibleIndex).top);
   }
+
+  /// Whether [child], a child of the column of components, is the placeholder of a node
+  /// that isn't built.
+  static bool _isPlaceholder(RenderBox child) => child is _RenderComponentSlot && child.isPlaceholder;
 
   /// Returns the index of the first child of [column] whose bottom edge is below [dy], or
   /// the number of children if there's none.
@@ -741,7 +748,7 @@ class _ProgressiveFill {
       if ((child.parentData! as FlexParentData).offset.dy >= bottom) {
         break;
       }
-      if (child is _RenderComponentPlaceholder && _deferred.contains(child.nodeId)) {
+      if (child is _RenderComponentSlot && child.isPlaceholder && _deferred.contains(child.nodeId)) {
         nodeIds.add(child.nodeId);
       }
     }
@@ -826,7 +833,7 @@ class _ProgressiveFill {
       if (index == null || index >= column.childCount) {
         continue;
       }
-      if (column.childAt(index) is _RenderComponentPlaceholder) {
+      if (_isPlaceholder(column.childAt(index))) {
         continue;
       }
       _measuredHeights[nodeId] = column.childRectAt(index).height;
@@ -930,7 +937,7 @@ class _ProgressiveFill {
     bool isFull() => batch.length >= _batchNodeCount || characterCount >= _batchCharacterCount;
     void consider(int index) {
       final child = column.childAt(index);
-      if (child is! _RenderComponentPlaceholder || !_deferred.contains(child.nodeId)) {
+      if (child is! _RenderComponentSlot || !child.isPlaceholder || !_deferred.contains(child.nodeId)) {
         return;
       }
       if (isAnimating && _doesGroupReachAbove(child.nodeId, firstIndexBelow)) {
@@ -938,7 +945,8 @@ class _ProgressiveFill {
         return;
       }
       batch.add(child.nodeId);
-      characterCount += _characterCount(child.viewModel);
+      final viewModel = child.viewModel;
+      characterCount += viewModel != null ? _characterCount(viewModel) : 1;
     }
 
     // The window around the viewport, below it first.
@@ -1055,26 +1063,36 @@ class _ProgressiveFill {
   }
 }
 
-/// A leaf render box that stands in for the component of a node that a progressive
-/// [SingleColumnDocumentLayout] hasn't built yet, at the component's estimated size.
-class _ComponentPlaceholder extends LeafRenderObjectWidget {
-  const _ComponentPlaceholder({
+/// The child of the column of components of a progressive [SingleColumnDocumentLayout]
+/// for one node: a placeholder of the component's estimated size while the node isn't
+/// built, and the node's component, its [child], once it is.
+///
+/// The slot stays in the column when its node is built, and after every node is built, so
+/// that building a node doesn't replace a child of the column, which then lays out only
+/// the slots that changed. See [RenderDocumentComponentColumn].
+class _ComponentSlot extends SingleChildRenderObjectWidget {
+  const _ComponentSlot({
     required this.nodeId,
     required this.viewModel,
     required this.fill,
+    super.child,
   });
 
   final String nodeId;
-  final SingleColumnLayoutComponentViewModel viewModel;
+
+  /// The view model that the placeholder estimates its height from, while there's no
+  /// [child].
+  final SingleColumnLayoutComponentViewModel? viewModel;
+
   final _ProgressiveFill fill;
 
   @override
-  _RenderComponentPlaceholder createRenderObject(BuildContext context) {
-    return _RenderComponentPlaceholder(nodeId: nodeId, viewModel: viewModel, fill: fill);
+  _RenderComponentSlot createRenderObject(BuildContext context) {
+    return _RenderComponentSlot(nodeId: nodeId, viewModel: viewModel, fill: fill);
   }
 
   @override
-  void updateRenderObject(BuildContext context, _RenderComponentPlaceholder renderObject) {
+  void updateRenderObject(BuildContext context, _RenderComponentSlot renderObject) {
     renderObject
       ..nodeId = nodeId
       ..viewModel = viewModel
@@ -1082,14 +1100,18 @@ class _ComponentPlaceholder extends LeafRenderObjectWidget {
   }
 }
 
-class _RenderComponentPlaceholder extends RenderBox {
-  _RenderComponentPlaceholder({
+class _RenderComponentSlot extends RenderProxyBox {
+  _RenderComponentSlot({
     required String nodeId,
-    required SingleColumnLayoutComponentViewModel viewModel,
+    required SingleColumnLayoutComponentViewModel? viewModel,
     required _ProgressiveFill fill,
   })  : _nodeId = nodeId,
         _viewModel = viewModel,
         _fill = fill;
+
+  /// Whether this slot stands in for the component of a node that isn't built, at the
+  /// component's estimated size.
+  bool get isPlaceholder => child == null;
 
   String get nodeId => _nodeId;
   String _nodeId;
@@ -1098,23 +1120,31 @@ class _RenderComponentPlaceholder extends RenderBox {
       return;
     }
     _nodeId = nodeId;
-    _estimatedHeights.clear();
-    markNeedsLayout();
+    _onEstimateChanged();
   }
 
-  SingleColumnLayoutComponentViewModel get viewModel => _viewModel;
-  SingleColumnLayoutComponentViewModel _viewModel;
-  set viewModel(SingleColumnLayoutComponentViewModel viewModel) {
-    if (identical(viewModel, _viewModel)) {
+  SingleColumnLayoutComponentViewModel? get viewModel => _viewModel;
+  SingleColumnLayoutComponentViewModel? _viewModel;
+  set viewModel(SingleColumnLayoutComponentViewModel? viewModel) {
+    final previousViewModel = _viewModel;
+    if (identical(viewModel, previousViewModel)) {
       return;
     }
-    final isSame = viewModel == _viewModel &&
+    if (!isPlaceholder) {
+      // The estimate isn't used while the slot holds its component.
+      _viewModel = viewModel;
+      _estimatedHeights.clear();
+      return;
+    }
+    final isSame = viewModel != null &&
+        previousViewModel != null &&
+        viewModel == previousViewModel &&
         (viewModel is! TextComponentViewModel ||
-            viewModel.textStyleBuilder(const {}) == (_viewModel as TextComponentViewModel).textStyleBuilder(const {}));
+            viewModel.textStyleBuilder(const {}) ==
+                (previousViewModel as TextComponentViewModel).textStyleBuilder(const {}));
     _viewModel = viewModel;
     if (!isSame) {
-      _estimatedHeights.clear();
-      markNeedsLayout();
+      _onEstimateChanged();
     }
   }
 
@@ -1125,51 +1155,61 @@ class _RenderComponentPlaceholder extends RenderBox {
       return;
     }
     _fill = fill;
+    _onEstimateChanged();
+  }
+
+  void _onEstimateChanged() {
     _estimatedHeights.clear();
-    markNeedsLayout();
+    if (isPlaceholder) {
+      markNeedsLayout();
+    }
   }
 
   /// The estimated heights, by the width of the column.
   final _estimatedHeights = <double, double>{};
 
   double _estimateHeight(double columnWidth) {
-    return _estimatedHeights[columnWidth] ??= _fill.estimateHeight(_viewModel, columnWidth);
+    final viewModel = _viewModel;
+    if (viewModel == null) {
+      return 0;
+    }
+    return _estimatedHeights[columnWidth] ??= _fill.estimateHeight(viewModel, columnWidth);
   }
 
-  Size _computeSize(BoxConstraints constraints) {
-    final maxWidth = _viewModel.maxWidth ?? double.infinity;
+  @override
+  void markNeedsLayout() {
+    final column = parent;
+    if (column is! RenderDocumentComponentColumn) {
+      super.markNeedsLayout();
+      return;
+    }
+
+    // Tell the column that this slot needs layout, so that it lays out only the slots
+    // that do.
+    column._markSlotNeedsLayout(this, super.markNeedsLayout);
+  }
+
+  @override
+  Size computeSizeForNoChild(BoxConstraints constraints) {
+    final maxWidth = _viewModel?.maxWidth ?? double.infinity;
     final width =
         constraints.hasBoundedWidth ? min(maxWidth, constraints.maxWidth) : (maxWidth.isFinite ? maxWidth : 0.0);
     return constraints.constrain(Size(width, _estimateHeight(constraints.maxWidth)));
   }
 
   @override
-  void performLayout() {
-    size = _computeSize(constraints);
-  }
+  double computeMinIntrinsicHeight(double width) =>
+      isPlaceholder ? _estimateHeight(width) : super.computeMinIntrinsicHeight(width);
 
   @override
-  Size computeDryLayout(covariant BoxConstraints constraints) => _computeSize(constraints);
-
-  @override
-  double computeMinIntrinsicWidth(double height) => 0;
-
-  @override
-  double computeMaxIntrinsicWidth(double height) => 0;
-
-  @override
-  double computeMinIntrinsicHeight(double width) => _estimateHeight(width);
-
-  @override
-  double computeMaxIntrinsicHeight(double width) => _estimateHeight(width);
-
-  @override
-  bool hitTestSelf(Offset position) => false;
+  double computeMaxIntrinsicHeight(double width) =>
+      isPlaceholder ? _estimateHeight(width) : super.computeMaxIntrinsicHeight(width);
 
   @override
   void debugFillProperties(DiagnosticPropertiesBuilder properties) {
     super.debugFillProperties(properties);
     properties.add(StringProperty("nodeId", _nodeId));
+    properties.add(FlagProperty("isPlaceholder", value: isPlaceholder, ifTrue: "placeholder"));
   }
 }
 

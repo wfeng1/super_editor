@@ -438,6 +438,39 @@ void main() {
       });
     });
 
+    group("column of components >", () {
+      testWidgets("stacks every child while it builds, and lays out as the eager layout does", (tester) async {
+        final harness = await _pumpEditor(tester, document: _createDocument(), initialScrollOffset: 3000);
+        harness.expectColumnIsStacked();
+        while (!harness.controller.isComplete.value) {
+          await tester.pump(const Duration(milliseconds: 16));
+          harness.expectColumnIsStacked();
+        }
+      });
+
+      testWidgets("lays out every child again when its width changes while it builds", (tester) async {
+        final harness = await _pumpEditor(tester, document: _createDocument(), frameBudget: Duration.zero);
+        await tester.pump(const Duration(milliseconds: 16));
+
+        tester.view.physicalSize = tester.view.physicalSize - const Offset(300, 0) as Size;
+        addTearDown(tester.view.reset);
+        await tester.pump(const Duration(milliseconds: 16));
+        harness.expectColumnIsStacked();
+
+        harness.controller.completeNow();
+        await tester.pump();
+        harness.expectColumnIsStacked();
+        final progressiveRects = harness.componentRects();
+
+        await tester.pumpWidget(const SizedBox());
+        final eager = await _pumpEditor(tester, document: _createDocument(), progressive: false);
+        final eagerRects = eager.componentRects();
+        for (final nodeId in eagerRects.keys) {
+          expect(progressiveRects[nodeId], _rectMoreOrLessEquals(eagerRects[nodeId]!), reason: "Node $nodeId");
+        }
+      });
+    });
+
     group("builds nodes together >", () {
       testWidgets("with a node in the first window, however far below the window they are", (tester) async {
         // Node 2 is so long that node 3's box starts far below the first frame's window.
@@ -1061,6 +1094,20 @@ class _Harness {
     final frames = await _pumpUntil(tester, () => controller.isComplete.value);
     expect(tester.takeException(), isNull);
     return frames;
+  }
+
+  /// Expects that the column of components stacks its children from top to bottom,
+  /// centered, without gaps, as a `Column` does, and that it's as tall as its children.
+  void expectColumnIsStacked() {
+    final column = this.column;
+    var top = 0.0;
+    for (int index = 0; index < column.childCount; index += 1) {
+      final rect = column.childRectAt(index);
+      expect(rect.top, moreOrLessEquals(top, epsilon: 0.001), reason: "Child $index");
+      expect(rect.center.dx, moreOrLessEquals(column.size.width / 2, epsilon: 0.001), reason: "Child $index");
+      top = rect.bottom;
+    }
+    expect(column.size.height, moreOrLessEquals(top, epsilon: 0.001));
   }
 
   /// The rect of the child at [index] in the column of components, which is a component

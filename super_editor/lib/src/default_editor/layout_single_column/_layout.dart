@@ -358,7 +358,7 @@ class _SingleColumnDocumentLayoutState extends State<SingleColumnDocumentLayout>
     }
     final child = column.childAt(index);
     final childRect = column.childRectAt(index).shift(columnOffset);
-    if (child is _RenderComponentPlaceholder && documentOffset.dy < childRect.bottom) {
+    if (child is _RenderComponentSlot && child.isPlaceholder && documentOffset.dy < childRect.bottom) {
       fill.ensureBuilt([child.nodeId]);
     }
   }
@@ -1620,21 +1620,32 @@ class _PresenterComponentBuilderState extends State<_PresenterComponentBuilder> 
         .presenter //
         .viewModel //
         .getComponentViewModelByNodeId(widget.watchNode);
-    if (viewModel == null) {
-      // The node was removed, and the layout will remove this builder in a moment.
-      return _component ?? const SizedBox();
-    }
 
     final fill = widget.registry.fill;
-    if (fill != null && widget.registry.isDeferred(widget.watchNode)) {
-      // The layout lays out progressively, and it hasn't built this node yet.
-      return _ComponentPlaceholder(
-        nodeId: widget.watchNode,
-        viewModel: viewModel,
-        fill: fill,
-      );
+    if (fill == null) {
+      // The node was removed, when there's no view model, and the layout will remove this
+      // builder in a moment.
+      return viewModel != null ? _buildComponent(viewModel) : _component ?? const SizedBox();
     }
 
+    // The layout lays out progressively. It puts every component in a slot, which is a
+    // placeholder until the layout builds the node, so that building the node gives the
+    // slot a child, rather than replace a child of the column of components.
+    final isDeferred = viewModel != null && widget.registry.isDeferred(widget.watchNode);
+    return _ComponentSlot(
+      nodeId: widget.watchNode,
+      viewModel: viewModel ?? _componentViewModel,
+      fill: fill,
+      child: isDeferred
+          ? null
+          : viewModel != null
+              ? _buildComponent(viewModel)
+              : _component ?? const SizedBox(),
+    );
+  }
+
+  /// Returns the component for [viewModel].
+  Widget _buildComponent(SingleColumnLayoutComponentViewModel viewModel) {
     // Return the identical component widget when nothing that it's built from changed,
     // so that Flutter skips the component's subtree. That's the case for most of the
     // components that the presenter reports as moved, e.g., all the components after a
@@ -1935,6 +1946,16 @@ class _DocumentComponentColumn extends Flex {
 /// hit-tests the children around the hit position, so that painting and hit-testing
 /// don't get slower as a document gets longer.
 ///
+/// ## Layout
+///
+/// The children of a [SingleColumnDocumentLayout] that lays out progressively are slots,
+/// which tell this box when they need layout. When only slots need layout, and nothing
+/// else changed since the last layout, i.e., the constraints, which must be unbounded in
+/// height and tight in width, and the children, this box lays out only those slots, and
+/// moves the children below them, so that a layout that builds a few more nodes of a long
+/// document doesn't lay out every child again. Otherwise, it lays out every child, as a
+/// [RenderFlex] does.
+///
 /// ## Painting
 ///
 /// This box paints a child when the child's paint rect intersects the visible rect,
@@ -1983,17 +2004,61 @@ class RenderDocumentComponentColumn extends RenderFlex {
   /// The children, from top to bottom, for random access, or `null` if the children
   /// changed since this list was last created.
   List<RenderBox>? _childList;
-  List<RenderBox> get _children => _childList ??= getChildrenAsList();
+  List<RenderBox> get _children => _childList ??= _listChildren();
 
-  /// The paint rects of the children whose paint rects aren't their layout rects, by
-  /// child index, or `null` if they haven't been read since the last layout.
+  List<RenderBox> _listChildren() {
+    final children = getChildrenAsList();
+    _slotIndices.clear();
+    _nonSlotChildCount = 0;
+    for (int i = 0; i < children.length; i += 1) {
+      final child = children[i];
+      if (child is _RenderComponentSlot) {
+        _slotIndices[child] = i;
+      } else {
+        _nonSlotChildCount += 1;
+      }
+    }
+    return children;
+  }
+
+  /// The paint rects of the children whose paint rects aren't their layout rects, in each
+  /// child's coordinates, by child index, or `null` if they haven't been read since the
+  /// last layout that laid out every child.
   Map<int, Rect>? _paintRectsOutsideOfLayout;
+
+  /// The indices of the children whose paint rects must be read again, because a layout
+  /// laid out only them, since the paint rects were read.
+  final Set<int> _childrenWithStalePaintRects = {};
 
   /// The farthest that any child paints above the top of its layout rect.
   double _maxPaintExtentAboveLayout = 0;
 
   /// The farthest that any child paints below the bottom of its layout rect.
   double _maxPaintExtentBelowLayout = 0;
+
+  /// The slots that need layout since the last layout, which they reported with
+  /// [_markSlotNeedsLayout].
+  final Set<_RenderComponentSlot> _slotsThatNeedLayout = {};
+
+  /// Whether this box needs to lay out every child, rather than only the slots that need
+  /// layout, because something besides a slot asked for a layout since the last one.
+  bool _needsFullLayout = true;
+
+  /// Whether a slot is marking this box as needing layout, through [_markSlotNeedsLayout].
+  bool _isSlotMarkingNeedsLayout = false;
+
+  /// The constraints of the last layout.
+  BoxConstraints? _lastLayoutConstraints;
+
+  /// The height of the children, stacked, in the last layout.
+  double _contentHeight = 0;
+
+  /// The number of children that aren't slots, which this box can't lay out on their own.
+  int _nonSlotChildCount = 0;
+
+  /// The index of each slot among the children, as of the last time that the children
+  /// were listed.
+  final Map<_RenderComponentSlot, int> _slotIndices = {};
 
   /// The child at [index], counting from the top.
   ///
@@ -2015,7 +2080,11 @@ class RenderDocumentComponentColumn extends RenderFlex {
   /// See the class documentation for how a child's paint rect is found.
   Rect childPaintRectAt(int index) {
     _readPaintRects();
-    return _paintRectsOutsideOfLayout![index] ?? childRectAt(index);
+    final paintRect = _paintRectsOutsideOfLayout![index];
+    if (paintRect == null) {
+      return childRectAt(index);
+    }
+    return paintRect.shift((_children[index].parentData! as FlexParentData).offset);
   }
 
   @override
@@ -2045,6 +2114,7 @@ class RenderDocumentComponentColumn extends RenderFlex {
   void _onChildrenChanged() {
     _childList = null;
     _paintRectsOutsideOfLayout = null;
+    _childrenWithStalePaintRects.clear();
     _childrenChangedSinceLayout = true;
   }
 
@@ -2053,13 +2123,114 @@ class RenderDocumentComponentColumn extends RenderFlex {
   bool get childrenChangedSinceLayout => _childrenChangedSinceLayout;
   bool _childrenChangedSinceLayout = true;
 
+  /// Records that [slot], one of the children, needs layout, and marks this box as needing
+  /// layout with [markSlotNeedsLayout], the slot's own [markNeedsLayout].
+  void _markSlotNeedsLayout(_RenderComponentSlot slot, VoidCallback markSlotNeedsLayout) {
+    _slotsThatNeedLayout.add(slot);
+    final wasSlotMarkingNeedsLayout = _isSlotMarkingNeedsLayout;
+    _isSlotMarkingNeedsLayout = true;
+    try {
+      markSlotNeedsLayout();
+    } finally {
+      _isSlotMarkingNeedsLayout = wasSlotMarkingNeedsLayout;
+    }
+  }
+
+  @override
+  void markNeedsLayout() {
+    if (!_isSlotMarkingNeedsLayout) {
+      // Something besides a slot changed, e.g., a child that isn't a slot, or a property.
+      _needsFullLayout = true;
+    }
+    super.markNeedsLayout();
+  }
+
   @override
   void performLayout() {
-    super.performLayout();
+    // Take what needs layout, so that anything that asks for a layout during this one is
+    // laid out in the next one.
+    final slotsThatNeedLayout = {..._slotsThatNeedLayout};
+    _slotsThatNeedLayout.clear();
+    final canLayOutOnlySlotsThatNeedLayout = _canLayOutOnlySlotsThatNeedLayout();
+    _needsFullLayout = false;
 
+    if (canLayOutOnlySlotsThatNeedLayout) {
+      _layOutOnlySlots(slotsThatNeedLayout);
+    } else {
+      super.performLayout();
+      final lastChild = this.lastChild;
+      _contentHeight =
+          lastChild != null ? (lastChild.parentData! as FlexParentData).offset.dy + lastChild.size.height : 0;
+      _paintRectsOutsideOfLayout = null;
+      _childrenWithStalePaintRects.clear();
+    }
+
+    _lastLayoutConstraints = constraints;
     _layoutCount += 1;
-    _paintRectsOutsideOfLayout = null;
     _childrenChangedSinceLayout = false;
+  }
+
+  /// Whether this layout can lay out only the slots that need layout, because nothing else
+  /// changed since the last layout, and every child is stacked as a [RenderFlex] for a
+  /// [_DocumentComponentColumn] stacks them.
+  bool _canLayOutOnlySlotsThatNeedLayout() {
+    final constraints = this.constraints;
+    return !_needsFullLayout &&
+        !_childrenChangedSinceLayout &&
+        hasSize &&
+        constraints == _lastLayoutConstraints &&
+        constraints.hasTightWidth &&
+        !constraints.hasBoundedHeight &&
+        direction == Axis.vertical &&
+        mainAxisAlignment == MainAxisAlignment.start &&
+        mainAxisSize == MainAxisSize.min &&
+        crossAxisAlignment == CrossAxisAlignment.center &&
+        verticalDirection == VerticalDirection.down &&
+        spacing == 0 &&
+        _children.isNotEmpty &&
+        _nonSlotChildCount == 0;
+  }
+
+  /// Lays out the [slots], with the constraints that [RenderFlex] gives every child,
+  /// centers them, and moves the children below them by how much their heights changed.
+  void _layOutOnlySlots(Set<_RenderComponentSlot> slots) {
+    final children = _children;
+    final indices = <int>[
+      for (final slot in slots)
+        if (identical(slot.parent, this) && _slotIndices[slot] != null) _slotIndices[slot]!,
+    ]..sort();
+
+    final width = constraints.maxWidth;
+    final childConstraints = BoxConstraints(maxWidth: width);
+    var shift = 0.0;
+    var next = 0;
+    for (int index = indices.isEmpty ? children.length : indices.first; index < children.length; index += 1) {
+      final child = children[index];
+      final parentData = child.parentData! as FlexParentData;
+      if (next < indices.length && indices[next] == index) {
+        next += 1;
+        final top = parentData.offset.dy + shift;
+        final previousHeight = child.size.height;
+        child.layout(childConstraints, parentUsesSize: true);
+        final childSize = child.size;
+        shift += childSize.height - previousHeight;
+        parentData.offset = Offset((width - childSize.width) / 2.0, top);
+        _childrenWithStalePaintRects.add(index);
+        continue;
+      }
+
+      if (shift == 0) {
+        if (next >= indices.length) {
+          // Nothing below this child moves.
+          break;
+        }
+        continue;
+      }
+      parentData.offset = Offset(parentData.offset.dx, parentData.offset.dy + shift);
+    }
+
+    _contentHeight += shift;
+    size = constraints.constrain(Size(width, _contentHeight));
   }
 
   /// Whether the children are stacked from top to bottom, which the binary searches in
@@ -2135,7 +2306,7 @@ class RenderDocumentComponentColumn extends RenderFlex {
         break;
       }
 
-      final paintRect = paintRectsOutsideOfLayout[i] ?? childOffset & child.size;
+      final paintRect = paintRectsOutsideOfLayout[i]?.shift(childOffset) ?? childOffset & child.size;
       if (paintRect.left <= visibleRect.right &&
           paintRect.right >= visibleRect.left &&
           paintRect.top <= visibleRect.bottom &&
@@ -2187,47 +2358,68 @@ class RenderDocumentComponentColumn extends RenderFlex {
   }
 
   /// Reads the paint rect of every child, and the farthest that any child paints outside
-  /// of its layout rect, if they haven't been read since the last layout.
+  /// of its layout rect, if they haven't been read since the last layout, or only those of
+  /// the children that the last layouts laid out, after a layout of only those.
   void _readPaintRects() {
-    if (_paintRectsOutsideOfLayout != null) {
+    final children = _children;
+    final paintRectsOutsideOfLayout = _paintRectsOutsideOfLayout;
+    if (paintRectsOutsideOfLayout == null) {
+      final paintRects = <int, Rect>{};
+      for (int i = 0; i < children.length; i += 1) {
+        _readPaintRectOf(children[i], i, paintRects);
+      }
+      _paintRectsOutsideOfLayout = paintRects;
+    } else if (_childrenWithStalePaintRects.isNotEmpty) {
+      for (final index in _childrenWithStalePaintRects) {
+        if (index < children.length) {
+          _readPaintRectOf(children[index], index, paintRectsOutsideOfLayout);
+        }
+      }
+    } else {
       return;
     }
+    _childrenWithStalePaintRects.clear();
 
-    final paintRectsOutsideOfLayout = <int, Rect>{};
     double maxPaintExtentAboveLayout = 0;
     double maxPaintExtentBelowLayout = 0;
-    final children = _children;
-    for (int i = 0; i < children.length; i += 1) {
-      final child = children[i];
-      final childOffset = (child.parentData! as FlexParentData).offset;
-      final layoutRect = childOffset & child.size;
-      final paintRect = _findPaintBounds(child).shift(childOffset);
-      if (paintRect != layoutRect) {
-        paintRectsOutsideOfLayout[i] = paintRect;
-        maxPaintExtentAboveLayout = max(maxPaintExtentAboveLayout, layoutRect.top - paintRect.top);
-        maxPaintExtentBelowLayout = max(maxPaintExtentBelowLayout, paintRect.bottom - layoutRect.bottom);
-      }
+    for (final entry in _paintRectsOutsideOfLayout!.entries) {
+      final paintRect = entry.value;
+      maxPaintExtentAboveLayout = max(maxPaintExtentAboveLayout, -paintRect.top);
+      maxPaintExtentBelowLayout = max(maxPaintExtentBelowLayout, paintRect.bottom - children[entry.key].size.height);
     }
-
-    _paintRectsOutsideOfLayout = paintRectsOutsideOfLayout;
     _maxPaintExtentAboveLayout = maxPaintExtentAboveLayout;
     _maxPaintExtentBelowLayout = maxPaintExtentBelowLayout;
   }
 
+  /// Records the paint rect of [child], at [index], in [paintRects], in the child's
+  /// coordinates, if it isn't the child's layout rect.
+  void _readPaintRectOf(RenderBox child, int index, Map<int, Rect> paintRects) {
+    final paintRect = _findPaintBounds(child);
+    if (paintRect != Offset.zero & child.size) {
+      paintRects[index] = paintRect;
+    } else {
+      paintRects.remove(index);
+    }
+  }
+
   /// Returns the rect that [child] paints in, in the child's coordinates: its bounds,
   /// expanded by its paint bounds, and by the paint bounds of the component inside the
-  /// boxes that [SingleColumnDocumentLayout] wraps around every component.
+  /// boxes that [SingleColumnDocumentLayout] wraps around every component, and the slot
+  /// that a progressive layout puts it in.
   static Rect _findPaintBounds(RenderBox child) {
     Rect paintBounds = (Offset.zero & child.size).expandToInclude(child.paintBounds);
 
-    // Walk through the ConstrainedBox, SizedBox, and Padding that wrap the component.
-    // Each of them paints its child where it laid the child out.
+    // Walk through the slot of a progressive layout, and the ConstrainedBox, SizedBox, and
+    // Padding that wrap the component. Each of them paints its child where it laid the
+    // child out.
     RenderBox box = child;
     Offset boxOffset = Offset.zero;
     while (true) {
       final RenderBox? innerBox;
       Offset innerBoxOffset = boxOffset;
-      if (box.runtimeType == RenderConstrainedBox) {
+      if (box is _RenderComponentSlot) {
+        innerBox = box.child;
+      } else if (box.runtimeType == RenderConstrainedBox) {
         innerBox = (box as RenderConstrainedBox).child;
       } else if (box.runtimeType == RenderPadding) {
         innerBox = (box as RenderPadding).child;
