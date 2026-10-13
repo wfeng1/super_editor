@@ -5,6 +5,7 @@ import 'package:flutter/widgets.dart';
 import 'package:super_editor/src/core/document.dart';
 import 'package:super_editor/src/core/document_layout.dart';
 import 'package:super_editor/src/core/document_selection.dart';
+import 'package:super_editor/src/default_editor/text.dart';
 import 'package:super_editor/src/infrastructure/_logging.dart';
 
 import '_presenter.dart';
@@ -78,6 +79,28 @@ class _SingleColumnDocumentLayoutState extends State<SingleColumnDocumentLayout>
 
   late SingleColumnLayoutPresenterChangeListener _presenterListener;
 
+  /// The component builders in the tree, by node ID, so that this layout's one
+  /// presenter listener can tell only the components that changed to rebuild.
+  final _componentBuilderRegistry = _ComponentBuilderRegistry();
+
+  /// The builder widget that was last built for each node, by node ID.
+  ///
+  /// When this layout rebuilds, a node's builder widget is reused, as the
+  /// identical instance, while its inputs don't change, so that Flutter skips
+  /// that node's component altogether. A component that changed is rebuilt by
+  /// its builder, which [_componentBuilderRegistry] tells to rebuild.
+  Map<String, _PresenterComponentBuilder> _builderWidgetsByNodeId = {};
+
+  /// Whether the next build should give every node a new builder widget, so that
+  /// every builder checks whether its component needs to rebuild, which is the
+  /// case after components were added, moved, or removed.
+  bool _checkEveryComponentInNextBuild = false;
+
+  /// The component builders that the builder widgets were given, which stays the
+  /// same list while the layout's [SingleColumnDocumentLayout.componentBuilders]
+  /// hold the same builders, even when the list itself is a new one.
+  List<ComponentBuilder>? _componentBuilders;
+
   // The key for the renderBox that contains the actual document layout.
   final GlobalKey _boxKey = GlobalKey();
   BuildContext get boxContext => _boxKey.currentContext!;
@@ -115,6 +138,14 @@ class _SingleColumnDocumentLayoutState extends State<SingleColumnDocumentLayout>
     super.dispose();
   }
 
+  @override
+  void reassemble() {
+    super.reassemble();
+
+    // Build new builder widgets after a hot reload.
+    _builderWidgetsByNodeId = {};
+  }
+
   Future<void> _onPresenterMarkedDirty() async {
     editorLayoutLog.fine("Layout presenter is dirty. Instructing it to update the view model.");
     widget.presenter.updateViewModel();
@@ -129,8 +160,20 @@ class _SingleColumnDocumentLayoutState extends State<SingleColumnDocumentLayout>
     if (addedComponents.isNotEmpty || movedComponents.isNotEmpty || removedComponents.isNotEmpty) {
       setState(() {
         // Re-flow the whole layout.
+        //
+        // The presenter reports a node that moved as moved, and a node whose component
+        // changed type as removed, even if its view model changed, and a stylesheet rule
+        // that depends on a node's neighbors, or on its index, can restyle a node that
+        // the presenter doesn't report at all. Give every builder a new widget, as this
+        // layout did before it reused builder widgets, so that every builder checks its
+        // view model during this layout's build. A builder only rebuilds its component
+        // if its view model changed.
+        _checkEveryComponentInNextBuild = true;
       });
     }
+
+    // Rebuild the components whose view models changed.
+    _componentBuilderRegistry.notifyViewModelChanged(changedComponents);
   }
 
   @override
@@ -758,35 +801,77 @@ class _SingleColumnDocumentLayoutState extends State<SingleColumnDocumentLayout>
     final newNodeIds = <GlobalKey, String>{};
     _topToBottomComponentKeys.clear();
 
+    // Keep the same list of component builders while the builders are the same, so
+    // that the builder widgets below can be reused.
+    if (!listEquals(_componentBuilders, widget.componentBuilders)) {
+      _componentBuilders = widget.componentBuilders;
+    }
+    final componentBuilders = _componentBuilders!;
+
+    final previousBuilderWidgets =
+        _checkEveryComponentInNextBuild ? const <String, _PresenterComponentBuilder>{} : _builderWidgetsByNodeId;
+    _checkEveryComponentInNextBuild = false;
+    final newBuilderWidgets = <String, _PresenterComponentBuilder>{};
+    // How many times each node ID appears, only for IDs that appear more than once.
+    Map<String, int>? duplicateNodeIdCounts;
+
     final viewModel = widget.presenter.viewModel;
     editorLayoutLog.fine("Rendering layout view model: ${viewModel.hashCode}");
     for (final componentViewModel in viewModel.componentViewModels) {
+      final nodeId = componentViewModel.nodeId;
+      final isDuplicateNodeId = newComponentKeys.containsKey(nodeId);
       final componentKey = _obtainComponentKeyForDocumentNode(
         newComponentKeyMap: newComponentKeys,
-        nodeId: componentViewModel.nodeId,
+        nodeId: nodeId,
       );
-      newNodeIds[componentKey] = componentViewModel.nodeId;
-      editorLayoutLog.finer('Node -> Key: ${componentViewModel.nodeId} -> $componentKey');
+      newNodeIds[componentKey] = nodeId;
+      editorLayoutLog.finer('Node -> Key: $nodeId -> $componentKey');
 
       _topToBottomComponentKeys.add(componentKey);
 
-      docComponents.add(
-        // Rebuilds whenever this particular component view model changes
-        // within the overall layout view model.
-        _PresenterComponentBuilder(
+      if (isDuplicateNodeId) {
+        // A document can briefly hold more than one node with the same ID. Give each
+        // extra node a key of its own, so that the keys of the builders stay unique.
+        duplicateNodeIdCounts ??= {};
+        final occurrence = duplicateNodeIdCounts[nodeId] = (duplicateNodeIdCounts[nodeId] ?? 0) + 1;
+        docComponents.add(
+          _PresenterComponentBuilder(
+            key: ValueKey<(String, int)>((nodeId, occurrence)),
+            presenter: widget.presenter,
+            registry: _componentBuilderRegistry,
+            watchNode: nodeId,
+            componentBuilders: componentBuilders,
+            componentKey: componentKey,
+          ),
+        );
+        continue;
+      }
+
+      // Reuse the identical builder widget from the previous build, when nothing that it
+      // holds changed, so that Flutter skips this component altogether. The builder
+      // rebuilds its component when the presenter reports that its node changed.
+      var builderWidget = previousBuilderWidgets[nodeId];
+      if (builderWidget == null ||
+          !identical(builderWidget.presenter, widget.presenter) ||
+          !identical(builderWidget.componentBuilders, componentBuilders) ||
+          !identical(builderWidget.componentKey, componentKey)) {
+        builderWidget = _PresenterComponentBuilder(
+          // Key each component by its node so that inserting or removing a node keeps
+          // every other component, and its Element, State, and GlobalKey, bound to
+          // the same node.
+          key: ValueKey<String>(nodeId),
           presenter: widget.presenter,
-          watchNode: componentViewModel.nodeId,
-          builder: (context, newComponentViewModel) {
-            // Converts the component view model into a widget.
-            return _Component(
-              componentBuilders: widget.componentBuilders,
-              componentKey: componentKey,
-              componentViewModel: newComponentViewModel,
-            );
-          },
-        ),
-      );
+          registry: _componentBuilderRegistry,
+          watchNode: nodeId,
+          componentBuilders: componentBuilders,
+          componentKey: componentKey,
+        );
+      }
+      newBuilderWidgets[nodeId] = builderWidget;
+      docComponents.add(builderWidget);
     }
+
+    _builderWidgetsByNodeId = newBuilderWidgets;
 
     _nodeIdsToComponentKeys
       ..clear()
@@ -885,62 +970,151 @@ class _SingleColumnDocumentLayoutState extends State<SingleColumnDocumentLayout>
   }
 }
 
+/// The component builders of a [SingleColumnDocumentLayout], by the node ID that each
+/// one builds, so that the layout, which listens to the presenter, can tell only the
+/// builders of the nodes that changed to rebuild.
+class _ComponentBuilderRegistry {
+  final _buildersByNodeId = <String, _PresenterComponentBuilderState>{};
+
+  /// More builders for node IDs that appear more than once in the document.
+  final _duplicateBuildersByNodeId = <String, List<_PresenterComponentBuilderState>>{};
+
+  void register(String nodeId, _PresenterComponentBuilderState builder) {
+    final existingBuilder = _buildersByNodeId[nodeId];
+    if (existingBuilder == null) {
+      _buildersByNodeId[nodeId] = builder;
+      return;
+    }
+    if (identical(existingBuilder, builder)) {
+      return;
+    }
+
+    final duplicates = _duplicateBuildersByNodeId[nodeId] ??= [];
+    if (!duplicates.contains(builder)) {
+      duplicates.add(builder);
+    }
+  }
+
+  void unregister(String nodeId, _PresenterComponentBuilderState builder) {
+    final duplicates = _duplicateBuildersByNodeId[nodeId];
+    if (identical(_buildersByNodeId[nodeId], builder)) {
+      if (duplicates != null && duplicates.isNotEmpty) {
+        _buildersByNodeId[nodeId] = duplicates.removeAt(0);
+      } else {
+        _buildersByNodeId.remove(nodeId);
+      }
+    } else {
+      duplicates?.remove(builder);
+    }
+
+    if (duplicates != null && duplicates.isEmpty) {
+      _duplicateBuildersByNodeId.remove(nodeId);
+    }
+  }
+
+  /// Tells the builders of the given [nodeIds] that their component view models might
+  /// have changed.
+  void notifyViewModelChanged(List<String> nodeIds) {
+    for (final nodeId in nodeIds) {
+      _buildersByNodeId[nodeId]?._onViewModelChange();
+
+      final duplicates = _duplicateBuildersByNodeId[nodeId];
+      if (duplicates != null) {
+        for (final builder in duplicates) {
+          builder._onViewModelChange();
+        }
+      }
+    }
+  }
+}
+
+/// Builds the component for the node with the ID [watchNode], from that node's view
+/// model in the [presenter], and rebuilds it when the layout's presenter listener,
+/// through the [registry], reports that the view model changed.
 class _PresenterComponentBuilder extends StatefulWidget {
   const _PresenterComponentBuilder({
-    Key? key,
+    super.key,
     required this.presenter,
+    required this.registry,
     required this.watchNode,
-    required this.builder,
-  }) : super(key: key);
+    required this.componentBuilders,
+    required this.componentKey,
+  });
 
   final SingleColumnLayoutPresenter presenter;
+  final _ComponentBuilderRegistry registry;
   final String watchNode;
-  final Widget Function(BuildContext, SingleColumnLayoutComponentViewModel) builder;
+  final List<ComponentBuilder> componentBuilders;
+  final GlobalKey componentKey;
 
   @override
   _PresenterComponentBuilderState createState() => _PresenterComponentBuilderState();
 }
 
 class _PresenterComponentBuilderState extends State<_PresenterComponentBuilder> {
-  late SingleColumnLayoutPresenterChangeListener _presenterListener;
+  /// The component that this builder built last, and what it was built from.
+  Widget? _component;
+  SingleColumnLayoutComponentViewModel? _componentViewModel;
+  SingleColumnLayoutPresenter? _componentPresenter;
+  List<ComponentBuilder>? _componentBuilders;
+  GlobalKey? _componentKey;
 
   @override
   void initState() {
     super.initState();
-
-    _presenterListener = SingleColumnLayoutPresenterChangeListener(
-      onViewModelChange: _onViewModelChange,
-    );
-    widget.presenter.addChangeListener(_presenterListener);
+    widget.registry.register(widget.watchNode, this);
   }
 
   @override
   void didUpdateWidget(_PresenterComponentBuilder oldWidget) {
     super.didUpdateWidget(oldWidget);
 
-    if (widget.presenter != oldWidget.presenter) {
-      oldWidget.presenter.removeChangeListener(_presenterListener);
-      widget.presenter.addChangeListener(_presenterListener);
+    if (!identical(widget.registry, oldWidget.registry) || widget.watchNode != oldWidget.watchNode) {
+      oldWidget.registry.unregister(oldWidget.watchNode, this);
+      widget.registry.register(widget.watchNode, this);
     }
   }
 
   @override
+  void reassemble() {
+    super.reassemble();
+
+    // Rebuild the component after a hot reload.
+    _component = null;
+  }
+
+  @override
   void dispose() {
-    widget.presenter.removeChangeListener(_presenterListener);
+    widget.registry.unregister(widget.watchNode, this);
     super.dispose();
   }
 
-  void _onViewModelChange({
-    required List<String> addedComponents,
-    required List<String> movedComponents,
-    required List<String> changedComponents,
-    required List<String> removedComponents,
-  }) {
-    if (changedComponents.contains(widget.watchNode)) {
-      setState(() {
-        // Re-build.
-      });
+  void _onViewModelChange() {
+    setState(() {
+      // Re-build.
+    });
+  }
+
+  /// Whether a component built from [previous] looks the same as one built from [next].
+  static bool _isSameViewModel(
+    SingleColumnLayoutComponentViewModel previous,
+    SingleColumnLayoutComponentViewModel next,
+  ) {
+    if (identical(previous, next)) {
+      return true;
     }
+    if (previous != next) {
+      return false;
+    }
+
+    // View model equality doesn't include a text component's style builder, which a
+    // stylesheet rule that depends on the node's neighbors, or on its index, changes
+    // when other nodes are added, removed, or moved. Compare the base styles that the
+    // style builders build.
+    if (previous is TextComponentViewModel && next is TextComponentViewModel) {
+      return previous.textStyleBuilder(const {}) == next.textStyleBuilder(const {});
+    }
+    return true;
   }
 
   @override
@@ -950,9 +1124,39 @@ class _PresenterComponentBuilderState extends State<_PresenterComponentBuilder> 
     final viewModel = widget
         .presenter //
         .viewModel //
-        .getComponentViewModelByNodeId(widget.watchNode)!;
+        .getComponentViewModelByNodeId(widget.watchNode);
+    if (viewModel == null) {
+      // The node was removed, and the layout will remove this builder in a moment.
+      return _component ?? const SizedBox();
+    }
 
-    return widget.builder(context, viewModel);
+    // Return the identical component widget when nothing that it's built from changed,
+    // so that Flutter skips the component's subtree. That's the case for most of the
+    // components that the presenter reports as moved, e.g., all the components after a
+    // node that was inserted.
+    //
+    // A new presenter always rebuilds the component, because view model equality
+    // doesn't cover everything that a new presenter, e.g., one with a new stylesheet,
+    // might change.
+    final component = _component;
+    if (component != null &&
+        identical(_componentPresenter, widget.presenter) &&
+        identical(_componentKey, widget.componentKey) &&
+        (identical(_componentBuilders, widget.componentBuilders) ||
+            listEquals(_componentBuilders, widget.componentBuilders)) &&
+        _isSameViewModel(_componentViewModel!, viewModel)) {
+      return component;
+    }
+
+    _componentViewModel = viewModel;
+    _componentPresenter = widget.presenter;
+    _componentBuilders = widget.componentBuilders;
+    _componentKey = widget.componentKey;
+    return _component = _Component(
+      componentBuilders: widget.componentBuilders,
+      componentKey: widget.componentKey,
+      componentViewModel: viewModel,
+    );
   }
 }
 
