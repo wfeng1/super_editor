@@ -1132,9 +1132,9 @@ class _SingleColumnDocumentLayoutState extends State<SingleColumnDocumentLayout>
   /// lays out progressively.
   ///
   /// The first frame builds the nodes whose estimated bounds overlap the window around the
-  /// initial scroll offset, plus the first and the last node. The first layout builds the
-  /// nodes that it finds in the visible region, and the nodes after the last selectable
-  /// one.
+  /// initial scroll offset, plus the first and the last node, and the nodes that must be
+  /// built with any of them. The first layout builds the nodes that it finds in the
+  /// visible region, and the nodes after the last selectable one.
   void _startProgressiveLayoutIfPossible() {
     final config = _progressiveLayoutConfig;
     if (config == null || !_canLayOutProgressively()) {
@@ -1179,6 +1179,23 @@ class _SingleColumnDocumentLayoutState extends State<SingleColumnDocumentLayout>
         built.add(componentViewModel.nodeId);
       }
       componentTop = componentBottom;
+    }
+
+    // Build the nodes that must be built with the ones in the window, too.
+    final buildTogether = config.buildTogether;
+    if (buildTogether != null) {
+      final nodesToVisit = [...built];
+      while (nodesToVisit.isNotEmpty) {
+        final group = buildTogether(nodesToVisit.removeLast());
+        if (group == null) {
+          continue;
+        }
+        for (final nodeId in group) {
+          if (built.add(nodeId)) {
+            nodesToVisit.add(nodeId);
+          }
+        }
+      }
     }
 
     final deferred = <String>{

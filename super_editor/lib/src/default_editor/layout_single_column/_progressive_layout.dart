@@ -38,6 +38,7 @@ class SingleColumnProgressiveLayout {
     this.initialScrollOffset,
     this.controller,
     this.safetyTimeout = const Duration(seconds: 3),
+    this.buildTogether,
   })  : _windowExtentAboveOffset = 0.5,
         _windowExtentBelowOffset = 1.5,
         _initialBatchNodeCount = 16,
@@ -51,6 +52,7 @@ class SingleColumnProgressiveLayout {
         initialScrollOffset = null,
         controller = null,
         safetyTimeout = const Duration(seconds: 3),
+        buildTogether = null,
         _windowExtentAboveOffset = 0,
         _windowExtentBelowOffset = 0,
         _initialBatchNodeCount = 1,
@@ -99,6 +101,29 @@ class SingleColumnProgressiveLayout {
   /// How long the layout waits, after its first frame, before it builds every node that
   /// isn't built yet, at once.
   final Duration safetyTimeout;
+
+  /// Returns the IDs of the nodes that must be built in the same frame as the node with
+  /// the given [nodeId], or `null`, or an empty iterable, when there are none.
+  ///
+  /// Whenever the layout builds a node, for any reason, e.g., because it's in the first
+  /// frame's window, because it became visible, or in the cache extent, because someone
+  /// asked for it with [SingleColumnProgressiveLayoutController.ensureBuilt], or in a
+  /// batch, it also builds the nodes that this returns for it, and the nodes that this
+  /// returns for those, in the same frame. Use it for nodes that paint together, e.g., the
+  /// nodes of a row of columns, which paint side by side, where the layout would otherwise
+  /// build a row's first column, and not its next ones, whose layout boxes are farther
+  /// down.
+  ///
+  /// The scroll offset correction that keeps the visible content still applies to every
+  /// node that a frame builds, so a group that's built above the visible content doesn't
+  /// move it. While an animation drives the scroll offset, there's no correction, so the
+  /// batches, and the cache extent below the viewport, skip the groups that reach above
+  /// the viewport, as the batches skip the nodes above it. A node that becomes visible
+  /// during the animation, or that was asked for, is still built with its group.
+  ///
+  /// The layout calls it for every node that it builds, and, while an animation scrolls,
+  /// for the nodes that it considers building, so it should be cheap, e.g., a lookup.
+  final Iterable<String>? Function(String nodeId)? buildTogether;
 
   /// The extents of the first frame's window, above and below the initial scroll offset,
   /// as fractions of the screen height.
@@ -271,12 +296,12 @@ class _ProgressiveFill {
   /// The IDs of the nodes that aren't built.
   final Set<String> _deferred;
 
-  /// The IDs of the deferred nodes to build in the next layout.
+  /// The IDs of the deferred nodes that were asked for, which the next layout builds.
   final Set<String> _pending = {};
 
-  /// Whether [_pending] holds a batch that the scheduler chose, whose time adapts the size
-  /// of the next batch.
-  bool _isPendingABatch = false;
+  /// The IDs of the deferred nodes that the scheduler chose to build in the next layout,
+  /// whose time adapts the size of the next batch.
+  final Set<String> _pendingBatch = {};
 
   /// The IDs of the nodes that were built since their heights were last measured.
   final Set<String> _builtSinceMeasuring;
@@ -356,7 +381,7 @@ class _ProgressiveFill {
     _safetyTimer?.cancel();
     _safetyTimer = null;
     _pending.addAll(_deferred);
-    _isPendingABatch = false;
+    _pendingBatch.clear();
     _requestLayout();
   }
 
@@ -437,6 +462,7 @@ class _ProgressiveFill {
 
     _deferred.removeWhere((nodeId) => !componentKeys.containsKey(nodeId));
     _pending.removeWhere((nodeId) => !_deferred.contains(nodeId));
+    _pendingBatch.removeWhere((nodeId) => !_deferred.contains(nodeId));
     _builtSinceMeasuring.removeWhere((nodeId) => !componentKeys.containsKey(nodeId));
 
     // Decide for each run of consecutive added nodes, by the nodes around the run.
@@ -468,9 +494,26 @@ class _ProgressiveFill {
       _deferred.remove(nodeIds.first);
       _deferred.remove(nodeIds.last);
     }
+
+    // An added node that's built, or that must be built with a node that's built, builds
+    // the rest of its group in this frame's layout.
+    final buildTogether = _config.buildTogether;
+    if (buildTogether != null && addedIndices.isNotEmpty) {
+      for (final index in addedIndices) {
+        final nodeId = nodeIds[index];
+        final group = {nodeId, ...?buildTogether(nodeId)};
+        if (group.any((member) => componentKeys.containsKey(member) && !_deferred.contains(member))) {
+          _pending.addAll(group.where(_deferred.contains));
+        }
+      }
+      if (_pending.isNotEmpty) {
+        // We're in the layout's build, before its layout.
+        _markAdapterNeedsLayout();
+      }
+    }
   }
 
-  /// Requests a layout of the progressive adapter, which builds the [_pending] nodes, now,
+  /// Requests a layout of the progressive adapter, which builds the pending nodes, now,
   /// or, during a frame's build, layout, or paint, after that frame.
   void _requestLayout() {
     if (!isActive) {
@@ -501,23 +544,57 @@ class _ProgressiveFill {
   /// Lays out the [adapter], building the nodes that it needs, and returns after it set
   /// the adapter's geometry.
   ///
-  /// Before the layout, it builds the [_pending] nodes, the deferred nodes that the last
-  /// layout put in the visible region, the first and last nodes, and the nodes after the
-  /// last selectable one. After the layout, it builds the deferred nodes that are still
-  /// visible, until there are none, and lays out again. When a child above the visible
-  /// content changed its height, it corrects the scroll offset so that the visible
-  /// content stays where it was on screen.
+  /// Before the layout, it builds the nodes that were asked for, the [_pendingBatch], the
+  /// deferred nodes that the last layout put in the visible region, or in the cache extent
+  /// below it, the first and last nodes, and the nodes after the last selectable one, and
+  /// the nodes that must be built with any of them. After the layout, it builds the
+  /// deferred nodes that are still visible, or in the cache extent, until there are none,
+  /// and lays out again. When a child above the visible content changed its height, it
+  /// corrects the scroll offset so that the visible content stays where it was on screen.
+  ///
+  /// While an animation drives the scroll offset, there's no correction, because the
+  /// animation sets the scroll offset again in the next frame, so the batch, and the
+  /// nodes in the cache extent, skip the nodes whose groups reach above the viewport, which
+  /// would move the visible content. The nodes that are visible, and the ones that were
+  /// asked for, are built with their groups.
   ///
   /// Everything that reads the geometry of the column's children runs in a layout
   /// callback, in which the adapter may read the sizes of its descendants.
   void layoutSliver(_RenderSliverProgressiveAdapter adapter) {
     final constraints = adapter.constraints;
     final stopwatch = Stopwatch()..start();
-    final isBatch = _isPendingABatch;
-    _isPendingABatch = false;
+    final isAnimating = _isAnimationDrivingScrollOffset;
 
-    final nodesToBuild = <String>{..._pending};
+    final requestedNodes = <String>{..._pending};
     _pending.clear();
+    final batch = <String>{..._pendingBatch};
+    _pendingBatch.clear();
+
+    // Builds the deferred nodes in the visible region, and in the cache extent below it,
+    // and returns whether it built any, or `null` if the column's children can't be read.
+    bool? buildVisibleNodes({Iterable<String> requestedNodes = const [], Iterable<String> batch = const []}) {
+      final column = _layout._componentColumn;
+      if (column == null || !_canReadLastLayoutOf(column)) {
+        return null;
+      }
+      // Read the column's children before building, which replaces some of them.
+      final columnTop = _columnTopInSliver(column);
+      final visibleTop = constraints.scrollOffset - columnTop;
+      final visibleBottom = visibleTop + constraints.remainingPaintExtent;
+      final visibleNodes = _deferredNodesBetween(column, visibleTop, visibleBottom);
+      final cacheNodes = _deferredNodesBetween(column, visibleBottom, _buildRegionBottom(constraints, columnTop));
+      final viewportTopIndex = _firstChildEndingBelow(column, visibleTop);
+
+      var didBuild = _buildNodes([...requestedNodes, ...visibleNodes]);
+      final optionalNodes = [...batch, ...cacheNodes];
+      didBuild = _buildNodes(
+            isAnimating
+                ? optionalNodes.where((nodeId) => !_doesGroupReachAbove(nodeId, viewportTopIndex))
+                : optionalNodes,
+          ) ||
+          didBuild;
+      return didBuild;
+    }
 
     _ProgressiveAnchor? anchor;
     var didBuild = false;
@@ -528,10 +605,11 @@ class _ProgressiveFill {
         final visibleTop = constraints.scrollOffset - columnTop;
         final visibleBottom = visibleTop + constraints.remainingPaintExtent;
         anchor = _findAnchor(column, visibleTop, visibleBottom, columnTop);
-        nodesToBuild.addAll(_deferredNodesBetween(column, visibleTop, _buildRegionBottom(constraints, columnTop)));
       }
 
-      didBuild = _buildNodes(nodesToBuild);
+      didBuild = buildVisibleNodes(requestedNodes: requestedNodes, batch: batch) ??
+          // We don't know where the nodes are, yet, e.g., in the first layout.
+          _buildNodes([...requestedNodes, ...batch]);
       didBuild = _buildEnds() || didBuild;
     });
     adapter.layoutChild();
@@ -541,14 +619,7 @@ class _ProgressiveFill {
     for (int pass = 0; pass < _maxBuildPassesPerLayout; pass += 1) {
       var didBuildVisibleNodes = false;
       adapter.runLayoutCallback(() {
-        final column = _layout._componentColumn;
-        if (column == null || !_canReadLastLayoutOf(column)) {
-          return;
-        }
-        final columnTop = _columnTopInSliver(column);
-        final visibleTop = constraints.scrollOffset - columnTop;
-        didBuildVisibleNodes =
-            _buildNodes(_deferredNodesBetween(column, visibleTop, _buildRegionBottom(constraints, columnTop)));
+        didBuildVisibleNodes = buildVisibleNodes() ?? false;
       });
       if (!didBuildVisibleNodes) {
         break;
@@ -558,7 +629,7 @@ class _ProgressiveFill {
     }
     stopwatch.stop();
 
-    if (isBatch) {
+    if (batch.isNotEmpty) {
       _batchCount += 1;
       _adaptBatchSize(stopwatch.elapsed);
     }
@@ -577,7 +648,7 @@ class _ProgressiveFill {
           !_canReadLastLayoutOf(column) ||
           anchorBeforeLayout.index >= column.childCount ||
           constraints.scrollOffset <= 0 ||
-          _isAnimationDrivingScrollOffset) {
+          isAnimating) {
         return;
       }
       final anchorTop = _columnTopInSliver(column) + column.childRectAt(anchorBeforeLayout.index).top;
@@ -677,17 +748,27 @@ class _ProgressiveFill {
     return nodeIds;
   }
 
-  /// Builds the components of the given deferred nodes, now, and returns whether it built
-  /// any.
+  /// Builds the components of the given deferred nodes, and of the nodes that must be
+  /// built with them, now, and returns whether it built any.
   ///
   /// Must be called in a layout callback of the layout's progressive adapter, or outside
   /// of a frame.
   bool _buildNodes(Iterable<String> nodeIds) {
     final builders = <_PresenterComponentBuilderState>[];
-    for (final nodeId in nodeIds) {
-      if (_deferred.remove(nodeId)) {
-        _builtSinceMeasuring.add(nodeId);
-        builders.addAll(_layout._componentBuilderRegistry.buildersOf(nodeId));
+    final buildTogether = _config.buildTogether;
+    final nodesToBuild = [...nodeIds];
+    while (nodesToBuild.isNotEmpty) {
+      final nodeId = nodesToBuild.removeLast();
+      if (!_deferred.remove(nodeId)) {
+        continue;
+      }
+      _builtSinceMeasuring.add(nodeId);
+      builders.addAll(_layout._componentBuilderRegistry.buildersOf(nodeId));
+
+      // Build the nodes that must be built with this one, in this frame, too.
+      final group = buildTogether?.call(nodeId);
+      if (group != null) {
+        nodesToBuild.addAll(group.where(_deferred.contains));
       }
     }
     if (builders.isEmpty) {
@@ -785,8 +866,7 @@ class _ProgressiveFill {
     if (batch.isEmpty) {
       return;
     }
-    _pending.addAll(batch);
-    _isPendingABatch = true;
+    _pendingBatch.addAll(batch);
     _markAdapterNeedsLayout();
   }
 
@@ -796,6 +876,7 @@ class _ProgressiveFill {
     _safetyTimer = null;
     _stopWaitingForScrollEnd();
     _pending.clear();
+    _pendingBatch.clear();
     _config.controller?._isComplete._set(true);
   }
 
@@ -849,10 +930,15 @@ class _ProgressiveFill {
     bool isFull() => batch.length >= _batchNodeCount || characterCount >= _batchCharacterCount;
     void consider(int index) {
       final child = column.childAt(index);
-      if (child is _RenderComponentPlaceholder && _deferred.contains(child.nodeId)) {
-        batch.add(child.nodeId);
-        characterCount += _characterCount(child.viewModel);
+      if (child is! _RenderComponentPlaceholder || !_deferred.contains(child.nodeId)) {
+        return;
       }
+      if (isAnimating && _doesGroupReachAbove(child.nodeId, firstIndexBelow)) {
+        // Building the group would move the content that the animation scrolls to.
+        return;
+      }
+      batch.add(child.nodeId);
+      characterCount += _characterCount(child.viewModel);
     }
 
     // The window around the viewport, below it first.
@@ -893,6 +979,35 @@ class _ProgressiveFill {
       return _fillBatch(_deferred.toList());
     }
     return batch;
+  }
+
+  /// Whether any deferred node that must be built with the node with the given [nodeId]
+  /// sits above the child at [index] in the column of components.
+  bool _doesGroupReachAbove(String nodeId, int index) {
+    final buildTogether = _config.buildTogether;
+    if (buildTogether == null) {
+      return false;
+    }
+
+    final visited = {nodeId};
+    final nodesToVisit = [nodeId];
+    while (nodesToVisit.isNotEmpty) {
+      final group = buildTogether(nodesToVisit.removeLast());
+      if (group == null) {
+        continue;
+      }
+      for (final member in group) {
+        if (!_deferred.contains(member) || !visited.add(member)) {
+          continue;
+        }
+        final memberIndex = _layout._nodeIndicesById[member];
+        if (memberIndex != null && memberIndex < index) {
+          return true;
+        }
+        nodesToVisit.add(member);
+      }
+    }
+    return false;
   }
 
   List<String> _fillBatch(List<String> candidates) {

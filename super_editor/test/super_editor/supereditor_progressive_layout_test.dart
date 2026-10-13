@@ -438,6 +438,281 @@ void main() {
       });
     });
 
+    group("builds nodes together >", () {
+      testWidgets("with a node in the first window, however far below the window they are", (tester) async {
+        // Node 2 is so long that node 3's box starts far below the first frame's window.
+        MutableDocument createDocument() {
+          final document = _createDocument();
+          document.replaceNodeById(
+            "2",
+            ParagraphNode(id: "2", text: AttributedText("A very long paragraph. " * 600)),
+          );
+          return document;
+        }
+
+        Iterable<String>? buildTogether(String nodeId) => switch (nodeId) {
+              "2" => ["3"],
+              "3" => ["2"],
+              _ => null,
+            };
+
+        // Without the group, node 3 isn't built in the first frame.
+        final ungrouped = await _pumpEditor(tester, document: createDocument());
+        expect(ungrouped.progressiveLayout.isComponentDeferred("2"), isFalse);
+        expect(ungrouped.progressiveLayout.isComponentDeferred("3"), isTrue);
+        expect(ungrouped.childRectInDocument(3).top, greaterThan(2000));
+
+        await tester.pumpWidget(const SizedBox());
+
+        // With the group, it is.
+        final grouped = await _pumpEditor(tester, document: createDocument(), buildTogether: buildTogether);
+        expect(grouped.progressiveLayout.isComponentDeferred("2"), isFalse);
+        expect(grouped.progressiveLayout.isComponentDeferred("3"), isFalse);
+        expect(grouped.layout.getComponentByNodeId("3"), isNotNull);
+        expect(grouped.componentRectInDocument("3").top, greaterThan(2000));
+        // The nodes after it aren't.
+        expect(grouped.progressiveLayout.isComponentDeferred("4"), isTrue);
+
+        await grouped.pumpUntilComplete(tester);
+      });
+
+      testWidgets("with a node that becomes visible, in the same frame", (tester) async {
+        Iterable<String>? buildTogether(String nodeId) => switch (nodeId) {
+              "200" => ["260"],
+              "260" => ["200"],
+              _ => null,
+            };
+        final harness = await _pumpEditor(tester, document: _createDocument(), buildTogether: buildTogether);
+        expect(harness.progressiveLayout.isComponentDeferred("200"), isTrue);
+        expect(harness.progressiveLayout.isComponentDeferred("260"), isTrue);
+
+        harness.scrollController.jumpTo(harness.childRectInDocument(200).top);
+        await tester.pump();
+
+        expect(harness.progressiveLayout.isComponentDeferred("200"), isFalse);
+        expect(harness.progressiveLayout.isComponentDeferred("260"), isFalse);
+        expect(harness.layout.getComponentByNodeId("260"), isNotNull);
+        expect(harness.progressiveLayout.isComponentDeferred("240"), isTrue);
+      });
+
+      testWidgets("with a node that the controller asks for", (tester) async {
+        Iterable<String>? buildTogether(String nodeId) => switch (nodeId) {
+              "200" || "201" || "350" => ["200", "201", "350"],
+              _ => null,
+            };
+        final harness = await _pumpEditor(tester, document: _createDocument(), buildTogether: buildTogether);
+        for (final nodeId in ["200", "201", "350"]) {
+          expect(harness.progressiveLayout.isComponentDeferred(nodeId), isTrue);
+        }
+
+        harness.controller.ensureBuilt(["201"]);
+        await tester.pump();
+
+        for (final nodeId in ["200", "201", "350"]) {
+          expect(harness.progressiveLayout.isComponentDeferred(nodeId), isFalse, reason: nodeId);
+          expect(harness.layout.getComponentByNodeId(nodeId), isNotNull, reason: nodeId);
+        }
+        expect(harness.progressiveLayout.isComponentDeferred("202"), isTrue);
+      });
+
+      testWidgets("in every frame, and lays out every node as the eager layout does, once complete", (tester) async {
+        final eager = await _pumpEditor(tester, document: _createDocument(), progressive: false);
+        final eagerRects = eager.componentRects();
+        await tester.pumpWidget(const SizedBox());
+
+        final harness = await _pumpEditor(tester, document: _createDocument(), buildTogether: _rowsOfThree);
+        harness.expectEveryGroupIsBuiltTogether(_rowsOfThree);
+        while (!harness.controller.isComplete.value) {
+          await tester.pump();
+          harness.expectEveryGroupIsBuiltTogether(_rowsOfThree);
+        }
+
+        final rects = harness.componentRects();
+        for (final nodeId in eagerRects.keys) {
+          expect(rects[nodeId], _rectMoreOrLessEquals(eagerRects[nodeId]!), reason: "Node $nodeId");
+        }
+      });
+
+      testWidgets("above the viewport, without moving the visible content", (tester) async {
+        final harness = await _pumpEditor(
+          tester,
+          document: _createDocument(),
+          initialScrollOffset: 6000,
+          buildTogether: _rowsOfThree,
+        );
+        harness.expectEveryVisibleNodeIsBuilt(tester);
+        harness.expectEveryGroupIsBuiltTogether(_rowsOfThree);
+        final visibleRects = harness.visibleComponentGlobalRects(tester);
+        expect(visibleRects, isNotEmpty);
+
+        while (!harness.controller.isComplete.value) {
+          await tester.pump();
+          for (final entry in visibleRects.entries) {
+            expect(harness.componentGlobalRect(entry.key), _rectMoreOrLessEquals(entry.value), reason: entry.key);
+          }
+        }
+        expect(harness.scrollController.offset, isNot(moreOrLessEquals(6000)));
+      });
+
+      testWidgets("when it jumps into content whose groups reach above the viewport", (tester) async {
+        final harness = await _pumpEditor(tester, document: _createDocument(), buildTogether: _rowsOfThree);
+
+        // Jump to the middle of a row, so that its first node is above the viewport.
+        const targetIndex = 251;
+        final jumpOffset = harness.childRectInDocument(targetIndex).top;
+        expect(harness.progressiveLayout.isComponentDeferred("$targetIndex"), isTrue);
+
+        harness.scrollController.jumpTo(jumpOffset);
+        await tester.pump();
+
+        // The row's first node, above the viewport, was built with it, and the node that the
+        // jump aimed at is still at the top of the viewport.
+        expect(harness.progressiveLayout.isComponentDeferred("250"), isFalse);
+        expect(harness.childRectInDocument(targetIndex).top - harness.scrollController.offset, moreOrLessEquals(0));
+        harness.expectEveryVisibleNodeIsBuilt(tester);
+        harness.expectEveryGroupIsBuiltTogether(_rowsOfThree);
+
+        final visibleRects = harness.visibleComponentGlobalRects(tester);
+        while (!harness.controller.isComplete.value) {
+          await tester.pump();
+          for (final entry in visibleRects.entries) {
+            expect(harness.componentGlobalRect(entry.key), _rectMoreOrLessEquals(entry.value), reason: entry.key);
+          }
+        }
+      });
+
+      testWidgets("and lands an animated scroll exactly where it was aimed", (tester) async {
+        final harness = await _pumpEditor(tester, document: _createDocument(), buildTogether: _rowsOfThree);
+
+        var isAnimationDone = false;
+        harness.scrollController
+            .animateTo(9000, duration: const Duration(milliseconds: 500), curve: Curves.easeInOut)
+            .then((_) => isAnimationDone = true);
+        while (!isAnimationDone) {
+          await tester.pump(const Duration(milliseconds: 16));
+          harness.expectEveryVisibleNodeIsBuilt(tester);
+          harness.expectEveryGroupIsBuiltTogether(_rowsOfThree);
+        }
+        expect(harness.scrollController.offset, 9000);
+
+        final visibleRects = harness.visibleComponentGlobalRects(tester);
+        while (!harness.controller.isComplete.value) {
+          await tester.pump();
+          for (final entry in visibleRects.entries) {
+            expect(harness.componentGlobalRect(entry.key), _rectMoreOrLessEquals(entry.value), reason: entry.key);
+          }
+        }
+      });
+
+      testWidgets("but not a group that reaches above the viewport while an animation scrolls", (tester) async {
+        // Node 5, far above the viewport, is grouped with a node that's chosen below.
+        String? partnerOfNode5;
+        Iterable<String>? buildTogether(String nodeId) {
+          if (partnerOfNode5 == null) {
+            return null;
+          }
+          return nodeId == "5"
+              ? [partnerOfNode5]
+              : nodeId == partnerOfNode5
+                  ? ["5"]
+                  : null;
+        }
+
+        final harness = await _pumpEditor(
+          tester,
+          document: _createDocument(),
+          initialScrollOffset: 6000,
+          buildTogether: buildTogether,
+        );
+        expect(harness.progressiveLayout.isComponentDeferred("5"), isTrue);
+
+        // Group node 5 with the first node that isn't built, at least 400 pixels below the
+        // viewport, which is beyond the cache extent.
+        final viewportExtent = tester.getRect(find.byType(Scrollable).first).height;
+        final partnerIndex = [
+          for (int i = 0; i < harness.document.nodeCount; i += 1)
+            if (harness.childRectInDocument(i).top >= 6000 + viewportExtent + 400 &&
+                harness.progressiveLayout.isComponentDeferred("$i"))
+              i,
+        ].first;
+        partnerOfNode5 = "$partnerIndex";
+        final partnerTop = harness.childRectInDocument(partnerIndex).top;
+
+        // Animate so that the node enters the cache extent below the viewport, but not the
+        // viewport.
+        final animationTarget = partnerTop - viewportExtent - 100;
+        var isAnimationDone = false;
+        harness.scrollController
+            .animateTo(animationTarget, duration: const Duration(seconds: 1), curve: Curves.linear)
+            .then((_) => isAnimationDone = true);
+        await tester.pump();
+
+        // While the animation scrolls, the visible content moves exactly as far as the
+        // scroll offset, so nothing above it was built.
+        var framesWithPartnerInCacheExtent = 0;
+        while (true) {
+          final offsetBefore = harness.scrollController.offset;
+          final rectsBefore = harness.visibleComponentGlobalRects(tester);
+          await tester.pump(const Duration(milliseconds: 16));
+          if (isAnimationDone) {
+            break;
+          }
+
+          final scrollDelta = harness.scrollController.offset - offsetBefore;
+          for (final entry in rectsBefore.entries) {
+            expect(
+              harness.componentGlobalRect(entry.key),
+              _rectMoreOrLessEquals(entry.value.translate(0, -scrollDelta)),
+              reason: entry.key,
+            );
+          }
+          expect(harness.progressiveLayout.isComponentDeferred("5"), isTrue);
+          expect(harness.progressiveLayout.isComponentDeferred(partnerOfNode5), isTrue);
+          if (harness.scrollController.offset + viewportExtent + 250 > partnerTop) {
+            framesWithPartnerInCacheExtent += 1;
+          }
+        }
+        expect(framesWithPartnerInCacheExtent, greaterThan(0));
+
+        // Once the animation ends, the layout builds the group, and keeps the visible
+        // content still.
+        await tester.pump();
+        expect(harness.progressiveLayout.isComponentDeferred("5"), isFalse);
+        expect(harness.progressiveLayout.isComponentDeferred(partnerOfNode5), isFalse);
+        final visibleRects = harness.visibleComponentGlobalRects(tester);
+        while (!harness.controller.isComplete.value) {
+          await tester.pump();
+          for (final entry in visibleRects.entries) {
+            expect(harness.componentGlobalRect(entry.key), _rectMoreOrLessEquals(entry.value), reason: entry.key);
+          }
+        }
+      });
+
+      testWidgets("when a node is added next to a node that's built", (tester) async {
+        // A node that's added later is grouped with a node far below it.
+        Iterable<String>? buildTogether(String nodeId) => switch (nodeId) {
+              "new" => ["300"],
+              "300" => ["new"],
+              _ => null,
+            };
+        final harness = await _pumpEditor(tester, document: _createDocument(), buildTogether: buildTogether);
+        expect(harness.progressiveLayout.isComponentDeferred("300"), isTrue);
+
+        // Add a node near the top, which is built, whose group is far below.
+        harness.editor.execute([
+          InsertNodeAtIndexRequest(
+            nodeIndex: 2,
+            newNode: ParagraphNode(id: "new", text: AttributedText("A new paragraph")),
+          ),
+        ]);
+        await tester.pump();
+
+        expect(harness.progressiveLayout.isComponentDeferred("new"), isFalse);
+        expect(harness.progressiveLayout.isComponentDeferred("300"), isFalse);
+        expect(harness.layout.getComponentByNodeId("300"), isNotNull);
+      });
+    });
+
     group("interaction while it builds >", () {
       testWidgetsOnMac("selects all, with the selection leaders, without errors", (tester) async {
         final harness = await _pumpEditor(tester, document: _createDocument(), autofocus: true);
@@ -664,6 +939,16 @@ void main() {
 
 /// A document of paragraphs of different lengths, so that their estimated heights are
 /// wrong by different amounts.
+/// Groups the nodes of a document from [_createDocument] in threes, as if each three nodes
+/// were the columns of a row.
+Iterable<String> _rowsOfThree(String nodeId) {
+  final index = int.parse(nodeId);
+  final rowStart = index - index % 3;
+  return [
+    for (int i = rowStart; i < rowStart + 3; i += 1) "$i",
+  ];
+}
+
 MutableDocument _createDocument({int paragraphCount = 400}) {
   return MutableDocument(
     nodes: [
@@ -687,6 +972,7 @@ Future<_Harness> _pumpEditor(
   // Longer than any test takes, so that the timeout doesn't hide a fill that stalls.
   Duration safetyTimeout = const Duration(minutes: 5),
   Duration frameBudget = const Duration(milliseconds: 6),
+  Iterable<String>? Function(String nodeId)? buildTogether,
   List<ComponentBuilder>? componentBuilders,
 }) async {
   final controller = SingleColumnProgressiveLayoutController();
@@ -701,6 +987,7 @@ Future<_Harness> _pumpEditor(
     controller: controller,
     safetyTimeout: safetyTimeout,
     frameBudget: frameBudget,
+    buildTogether: buildTogether,
   );
   Widget superEditor = SuperEditor(
     editor: editor,
@@ -766,9 +1053,9 @@ class _Harness {
   }
 
   Set<String> builtNodeIds() => {
-    for (final node in document)
-      if (!progressiveLayout.isComponentDeferred(node.id)) node.id,
-  };
+        for (final node in document)
+          if (!progressiveLayout.isComponentDeferred(node.id)) node.id,
+      };
 
   Future<int> pumpUntilComplete(WidgetTester tester) async {
     final frames = await _pumpUntil(tester, () => controller.isComplete.value);
@@ -818,6 +1105,20 @@ class _Harness {
         if (layout.getComponentByNodeId(node.id) != null && componentGlobalRect(node.id).overlaps(viewport))
           node.id: componentGlobalRect(node.id),
     };
+  }
+
+  /// Expects that the nodes of every group are either all built, or all not built.
+  void expectEveryGroupIsBuiltTogether(Iterable<String>? Function(String nodeId) buildTogether) {
+    for (final node in document) {
+      final isDeferred = progressiveLayout.isComponentDeferred(node.id);
+      for (final member in buildTogether(node.id) ?? const <String>[]) {
+        expect(
+          progressiveLayout.isComponentDeferred(member),
+          isDeferred,
+          reason: "Node ${node.id} is ${isDeferred ? "not built" : "built"}, but $member, in its group, isn't",
+        );
+      }
+    }
   }
 
   void expectEveryVisibleNodeIsBuilt(WidgetTester tester) {
