@@ -7,8 +7,14 @@ part of '_layout.dart';
 /// screen above it to one and a half screens below it, plus the first node, the last
 /// node, and the nodes after the last selectable one. Every other node is a placeholder
 /// of estimated height, until a later frame builds it. Those frames build the nodes below
-/// the viewport first, nearest first, and then the nodes above it, a batch at a time,
-/// sized to take about [frameBudget] each.
+/// the viewport first, nearest first, and then the nodes above it, a batch at a time.
+///
+/// Each batch is sized so that its whole frame, including the frame's other work, takes
+/// about [frameBudget]. The layout measures every frame that builds a batch, and how long
+/// the batch took, and grows the next batch while the frames stay under the budget. Once
+/// [safetyTimeout] has passed, the batches are sized to [catchUpFrameBudget] instead, and
+/// they go on while the user scrolls, so that the layout always finishes, without a frame
+/// that builds everything at once.
 ///
 /// The visible content doesn't move while the rest is built:
 ///
@@ -16,9 +22,10 @@ part of '_layout.dart';
 ///    fling, before it paints;
 ///  * when the nodes that are built above the visible content are taller, or shorter,
 ///    than their estimates, the layout corrects the scroll offset by the difference;
-///  * while the user scrolls, only the nodes around the viewport are built, and while an
-///    animation drives the scroll offset, e.g., `ScrollPosition.animateTo()`, no node
-///    above the viewport is built, so that the animation lands where it was aimed.
+///  * while the user scrolls, only the nodes around the viewport are built, until
+///    [safetyTimeout] has passed, and while an animation drives the scroll offset, e.g.,
+///    `ScrollPosition.animateTo()`, no node above the viewport is built, so that the
+///    animation lands where it was aimed.
 ///
 /// Until every node is built, a node that isn't built has no [DocumentComponent], so
 /// [DocumentLayout.getComponentByNodeId] returns `null` for it, the position lookups skip
@@ -34,29 +41,30 @@ part of '_layout.dart';
 class SingleColumnProgressiveLayout {
   const SingleColumnProgressiveLayout({
     this.estimateHeight,
-    this.frameBudget = const Duration(milliseconds: 6),
+    this.frameBudget = const Duration(milliseconds: 12),
     this.initialScrollOffset,
     this.controller,
-    this.safetyTimeout = const Duration(seconds: 3),
+    this.safetyTimeout = const Duration(seconds: 1),
+    this.catchUpFrameBudget = const Duration(milliseconds: 50),
     this.buildTogether,
   })  : _windowExtentAboveOffset = 0.5,
         _windowExtentBelowOffset = 1.5,
-        _initialBatchNodeCount = 16,
-        _initialBatchCharacterCount = 4000;
+        _initialBatchUnits = 4000;
 
   /// The configuration that [debugProgressiveByDefault] gives every layout that isn't
-  /// configured: a first frame that builds only what's visible, and batches of one node.
+  /// configured: a first frame that builds only what's visible, and batches of one node,
+  /// until the [safetyTimeout].
   const SingleColumnProgressiveLayout._debugDefault()
       : estimateHeight = null,
         frameBudget = Duration.zero,
         initialScrollOffset = null,
         controller = null,
         safetyTimeout = const Duration(seconds: 3),
+        catchUpFrameBudget = const Duration(milliseconds: 50),
         buildTogether = null,
         _windowExtentAboveOffset = 0,
         _windowExtentBelowOffset = 0,
-        _initialBatchNodeCount = 1,
-        _initialBatchCharacterCount = 1;
+        _initialBatchUnits = 1;
 
   /// When `true`, every [SingleColumnDocumentLayout] that isn't given a configuration, and
   /// that could lay out progressively, lays out progressively, with a first frame that
@@ -81,10 +89,15 @@ class SingleColumnProgressiveLayout {
   /// content that it was taken at.
   final double? Function(SingleColumnLayoutComponentViewModel viewModel, double width)? estimateHeight;
 
-  /// About how long each frame after the first one should spend building, and laying out,
-  /// more nodes.
+  /// About how long each frame that builds a batch of nodes should take, in all, until
+  /// [safetyTimeout] has passed.
   ///
-  /// The size of each batch adapts to the time that the last batch took.
+  /// The budget covers the whole frame, i.e., the batch, and everything else that the
+  /// frame does, e.g., laying out, and painting, the rest of the app. The layout measures
+  /// every frame that builds a batch, and how long the batch took, and sizes the next
+  /// batch to what's left of the budget after the rest of the frame. A batch grows by at
+  /// most twice from one frame to the next. Every batch builds at least one node, so a
+  /// budget of zero builds one node per frame.
   final Duration frameBudget;
 
   /// Returns the scroll offset, within the document layout, that the first frame shows,
@@ -98,9 +111,25 @@ class SingleColumnProgressiveLayout {
   /// A controller that reports when every node is built, and that builds nodes on demand.
   final SingleColumnProgressiveLayoutController? controller;
 
-  /// How long the layout waits, after its first frame, before it builds every node that
-  /// isn't built yet, at once.
+  /// How long, after its first frame, the layout sizes its batches to [frameBudget], and,
+  /// while the user scrolls, builds only the nodes around the viewport.
+  ///
+  /// After that, the batches are sized to [catchUpFrameBudget], or to [frameBudget] while
+  /// the user scrolls, and they go on while the user scrolls, so that the layout finishes
+  /// even when the user scrolls for a long time. No frame builds everything at once, unless
+  /// the app calls [SingleColumnProgressiveLayoutController.completeNow].
+  ///
+  /// The default lets the frames right after the first one, e.g., those of a page
+  /// transition, stay short, and then finishes about as soon as building everything in the
+  /// first frame would have.
   final Duration safetyTimeout;
+
+  /// About how long each frame that builds a batch of nodes should take, in all, once
+  /// [safetyTimeout] has passed, unless the user scrolls.
+  ///
+  /// A larger budget finishes sooner, because each frame has a fixed cost, besides its
+  /// batch, while a smaller one keeps animations smoother in the meantime.
+  final Duration catchUpFrameBudget;
 
   /// Returns the IDs of the nodes that must be built in the same frame as the node with
   /// the given [nodeId], or `null`, or an empty iterable, when there are none.
@@ -130,10 +159,9 @@ class SingleColumnProgressiveLayout {
   final double _windowExtentAboveOffset;
   final double _windowExtentBelowOffset;
 
-  /// The number of nodes, and the number of text characters, in the first batch after the
-  /// first frame. A batch stops at whichever it reaches first.
-  final int _initialBatchNodeCount;
-  final int _initialBatchCharacterCount;
+  /// The work in the first batch after the first frame, in the units of
+  /// [_ProgressiveFill._workUnitsOf]: about 16 nodes of 150 characters each.
+  final double _initialBatchUnits;
 }
 
 /// Reports when a [SingleColumnDocumentLayout] that lays out progressively has built every
@@ -273,10 +301,9 @@ class _ProgressiveFill {
         _config = config,
         _deferred = deferred,
         _builtSinceMeasuring = built,
-        _batchNodeCount = config._initialBatchNodeCount,
-        _batchCharacterCount = config._initialBatchCharacterCount {
+        // Until a batch is measured, the first one is a guess, except for a budget of zero.
+        _batchUnits = config.frameBudget > Duration.zero ? config._initialBatchUnits : 1 {
     _attachController(config.controller);
-    _safetyTimer = Timer(config.safetyTimeout, completeNow);
   }
 
   final _SingleColumnDocumentLayoutState _layout;
@@ -299,23 +326,64 @@ class _ProgressiveFill {
   /// The IDs of the nodes that aren't built.
   final Set<String> _deferred;
 
+  /// The indices, in the column of components, of the children whose nodes might be
+  /// deferred, in ascending order, or `null` if they need to be found again, after nodes
+  /// were added, removed, or moved.
+  ///
+  /// The batches pick their nodes from this list, so that they don't scan the nodes that
+  /// are built. A node leaves the list when it's built.
+  List<int>? _deferredIndices;
+
   /// The IDs of the deferred nodes that were asked for, which the next layout builds.
   final Set<String> _pending = {};
 
-  /// The IDs of the deferred nodes that the scheduler chose to build in the next layout,
-  /// whose time adapts the size of the next batch.
+  /// The IDs of the deferred nodes that the scheduler chose to build in the next layout.
   final Set<String> _pendingBatch = {};
 
   /// The IDs of the nodes that were built since their heights were last measured.
   final Set<String> _builtSinceMeasuring;
 
-  int _batchNodeCount;
-  int _batchCharacterCount;
+  /// The work of the next batch, in the units of [_workUnitsOf].
+  double _batchUnits;
+
+  /// The work that the last frame that built a batch built, in the units of [_workUnitsOf],
+  /// which the next batch can grow to twice of, and whether that frame was measured since
+  /// the batch was last sized.
+  double _unitsOfLastBatchFrame = 0;
+  bool _hasMeasuredBatchFrameSinceSizing = false;
+
+  /// The measured time that the batches take per unit of work, in microseconds, or `null`
+  /// until a batch was measured.
+  double? _microsecondsPerUnit;
+
+  /// The measured time that a frame that builds a batch spends on everything but building,
+  /// and laying out, its nodes, in microseconds, or `null` until a frame was measured.
+  double? _frameOverheadMicroseconds;
+
+  /// Times the frame that builds the next batch, from the start of the frame.
+  final _frameStopwatch = Stopwatch();
+  int? _frameTimingCallbackId;
+
+  /// Whether [_frameStopwatch] started at the beginning of this frame.
+  bool _isFrameTimed = false;
+
+  /// What this frame built, and how long its layouts took to build it.
+  bool _didBuildBatchThisFrame = false;
+  double _unitsBuiltThisFrame = 0;
+  Duration _layoutTimeThisFrame = Duration.zero;
 
   /// The number of batches that were built after the first frame.
   int _batchCount = 0;
 
+  /// Fires [SingleColumnProgressiveLayout.safetyTimeout] after the first frame.
   Timer? _safetyTimer;
+  bool _hasStartedSafetyTimer = false;
+
+  /// Whether the [SingleColumnProgressiveLayout.safetyTimeout] has passed, after which the
+  /// batches are sized to [SingleColumnProgressiveLayout.catchUpFrameBudget], and they go
+  /// on while the user scrolls.
+  bool _isCatchingUp = false;
+
   bool _isPostFrameCallbackScheduled = false;
 
   /// The scroll position whose scrolling this fill waits to end before it builds more.
@@ -356,6 +424,7 @@ class _ProgressiveFill {
     _isDisposed = true;
     _safetyTimer?.cancel();
     _safetyTimer = null;
+    _cancelFrameTiming();
     _stopWaitingForScrollEnd();
     _detachController();
   }
@@ -383,9 +452,26 @@ class _ProgressiveFill {
 
     _safetyTimer?.cancel();
     _safetyTimer = null;
+    _hasStartedSafetyTimer = true;
     _pending.addAll(_deferred);
     _pendingBatch.clear();
     _requestLayout();
+  }
+
+  /// Starts building the rest in batches sized to the catch-up frame budget, which go on
+  /// while the user scrolls.
+  void _startCatchingUp() {
+    _safetyTimer = null;
+    if (!isActive) {
+      return;
+    }
+
+    _isCatchingUp = true;
+    // Choose the next batch after the next frame, even if the fill waits for the scrolling
+    // to end.
+    _stopWaitingForScrollEnd();
+    _schedulePostFrameCallback();
+    SchedulerBinding.instance.ensureVisualUpdate();
   }
 
   /// Returns the estimated height of the child, in the column of components, of the node
@@ -442,10 +528,14 @@ class _ProgressiveFill {
     return max(wrappedLines + lineBreaks, 1) * lineHeight;
   }
 
-  /// The number of characters that a batch counts for [viewModel].
-  static int _characterCount(SingleColumnLayoutComponentViewModel viewModel) {
-    return viewModel is TextComponentViewModel ? max(viewModel.text.length, 1) : 100;
+  /// The work of building the component for [viewModel], in units that the batches are
+  /// measured in: a fixed amount for the component, plus one unit per text character.
+  static double _workUnitsOf(SingleColumnLayoutComponentViewModel? viewModel) {
+    return _workUnitsPerComponent + (viewModel is TextComponentViewModel ? viewModel.text.length : 0);
   }
+
+  /// The work of building a component, besides its text, in characters' worth of work.
+  static const _workUnitsPerComponent = 100.0;
 
   /// Updates the deferred nodes after the layout built its components for a new list of
   /// nodes, before the components build.
@@ -462,6 +552,9 @@ class _ProgressiveFill {
     if (!isActive) {
       return;
     }
+
+    // The nodes moved, so find their indices again before the next batch.
+    _deferredIndices = null;
 
     _deferred.removeWhere((nodeId) => !componentKeys.containsKey(nodeId));
     _pending.removeWhere((nodeId) => !_deferred.contains(nodeId));
@@ -630,11 +723,10 @@ class _ProgressiveFill {
       didBuild = true;
       adapter.layoutChild();
     }
-    stopwatch.stop();
 
     if (batch.isNotEmpty) {
       _batchCount += 1;
-      _adaptBatchSize(stopwatch.elapsed);
+      _didBuildBatchThisFrame = true;
     }
     _schedulePostFrameCallback();
 
@@ -657,6 +749,7 @@ class _ProgressiveFill {
       final anchorTop = _columnTopInSliver(column) + column.childRectAt(anchorBeforeLayout.index).top;
       correction = max(anchorTop - anchorBeforeLayout.top, -constraints.scrollOffset);
     });
+    _layoutTimeThisFrame += stopwatch.elapsed;
 
     if (didBuild) {
       adapter._didBuildDuringLayout = true;
@@ -763,13 +856,16 @@ class _ProgressiveFill {
   bool _buildNodes(Iterable<String> nodeIds) {
     final builders = <_PresenterComponentBuilderState>[];
     final buildTogether = _config.buildTogether;
+    final viewModel = _layout.widget.presenter.viewModel;
     final nodesToBuild = [...nodeIds];
     while (nodesToBuild.isNotEmpty) {
       final nodeId = nodesToBuild.removeLast();
       if (!_deferred.remove(nodeId)) {
         continue;
       }
+      _removeDeferredIndex(nodeId);
       _builtSinceMeasuring.add(nodeId);
+      _unitsBuiltThisFrame += _workUnitsOf(viewModel.getComponentViewModelByNodeId(nodeId));
       builders.addAll(_layout._componentBuilderRegistry.buildersOf(nodeId));
 
       // Build the nodes that must be built with this one, in this frame, too.
@@ -791,6 +887,46 @@ class _ProgressiveFill {
       }
     });
     return true;
+  }
+
+  /// Returns the indices of the children whose nodes might be deferred, finding them if
+  /// they need to be found.
+  List<int> _obtainDeferredIndices() {
+    final nodeIds = _layout._topToBottomNodeIds;
+    return _deferredIndices ??= [
+      for (int index = 0; index < nodeIds.length; index += 1)
+        if (_deferred.contains(nodeIds[index])) index,
+    ];
+  }
+
+  /// Removes the index of the node with the given [nodeId], which was just built, from
+  /// [_deferredIndices].
+  void _removeDeferredIndex(String nodeId) {
+    final indices = _deferredIndices;
+    final index = _layout._nodeIndicesById[nodeId];
+    if (indices == null || index == null) {
+      return;
+    }
+    final position = _lowerBound(indices, index);
+    if (position < indices.length && indices[position] == index) {
+      indices.removeAt(position);
+    }
+  }
+
+  /// Returns the position of the first value in the ascending [values] that's at least
+  /// [value], or the length of [values] if there's none.
+  static int _lowerBound(List<int> values, int value) {
+    int low = 0;
+    int high = values.length;
+    while (low < high) {
+      final middle = (low + high) >> 1;
+      if (values[middle] < value) {
+        low = middle + 1;
+      } else {
+        high = middle;
+      }
+    }
+    return low;
   }
 
   /// Builds the first and last nodes, and the nodes after the last selectable one, if
@@ -841,21 +977,93 @@ class _ProgressiveFill {
     _builtSinceMeasuring.clear();
   }
 
-  void _adaptBatchSize(Duration elapsed) {
-    final budget = _config.frameBudget.inMicroseconds;
-    final spent = max(elapsed.inMicroseconds, 1);
-    final ratio = (budget / spent).clamp(0.5, 2.0);
-    _batchNodeCount = max((_batchNodeCount * ratio).round(), 1);
-    _batchCharacterCount = max((_batchCharacterCount * ratio).round(), 1);
+  /// Starts [_frameStopwatch] at the beginning of the next frame, which builds a batch.
+  void _timeNextFrame() {
+    if (_frameTimingCallbackId != null) {
+      return;
+    }
+    _frameTimingCallbackId = SchedulerBinding.instance.scheduleFrameCallback((_) {
+      _frameTimingCallbackId = null;
+      _frameStopwatch
+        ..reset()
+        ..start();
+      _isFrameTimed = true;
+    });
+  }
+
+  void _cancelFrameTiming() {
+    final callbackId = _frameTimingCallbackId;
+    if (callbackId != null) {
+      SchedulerBinding.instance.cancelFrameCallbackWithId(callbackId);
+      _frameTimingCallbackId = null;
+    }
+    _isFrameTimed = false;
+  }
+
+  /// Learns from the frame that just ended how long a unit of work takes, and how long
+  /// the rest of a frame takes, if that frame built a batch, and then resets what this
+  /// frame built.
+  void _measureFrame() {
+    final frameTime = _isFrameTimed ? _frameStopwatch.elapsed : null;
+    _isFrameTimed = false;
+    _frameStopwatch.stop();
+
+    if (_didBuildBatchThisFrame && _unitsBuiltThisFrame > 0) {
+      _unitsOfLastBatchFrame = _unitsBuiltThisFrame;
+      _hasMeasuredBatchFrameSinceSizing = true;
+
+      final work = max(_layoutTimeThisFrame.inMicroseconds, 1);
+      final microsecondsPerUnit = work / _unitsBuiltThisFrame;
+      final previousMicrosecondsPerUnit = _microsecondsPerUnit;
+      _microsecondsPerUnit = previousMicrosecondsPerUnit == null
+          ? microsecondsPerUnit
+          : (previousMicrosecondsPerUnit + microsecondsPerUnit) / 2;
+
+      if (frameTime != null) {
+        final overhead = max(frameTime.inMicroseconds - work, 0).toDouble();
+        final previousOverhead = _frameOverheadMicroseconds;
+        _frameOverheadMicroseconds = previousOverhead == null ? overhead : (previousOverhead + overhead) / 2;
+      }
+    }
+
+    _didBuildBatchThisFrame = false;
+    _unitsBuiltThisFrame = 0;
+    _layoutTimeThisFrame = Duration.zero;
+  }
+
+  /// Sizes the next batch so that its frame takes about [frameBudget], given what the last
+  /// frames took, and the rest of those frames, to at most twice what the last frame that
+  /// built a batch built, and to at least one node.
+  ///
+  /// The size changes only after a frame that built a batch was measured, so that a batch
+  /// grows by at most twice per frame that built one.
+  void _sizeNextBatch(Duration frameBudget) {
+    final microsecondsPerUnit = _microsecondsPerUnit;
+    if (microsecondsPerUnit == null || !_hasMeasuredBatchFrameSinceSizing) {
+      // Nothing was measured since the last batch was sized. Build what was chosen then.
+      return;
+    }
+    _hasMeasuredBatchFrameSinceSizing = false;
+
+    final available = frameBudget.inMicroseconds - (_frameOverheadMicroseconds ?? 0);
+    final units = available / microsecondsPerUnit;
+    _batchUnits = units.clamp(1.0, max(_unitsOfLastBatchFrame * 2, 1.0));
   }
 
   void _onPostFrame(Duration _) {
     _isPostFrameCallbackScheduled = false;
+    _measureFrame();
     if (!isActive) {
       return;
     }
     if (!_layout.mounted) {
       return;
+    }
+
+    if (!_hasStartedSafetyTimer) {
+      // This is the end of the first frame.
+      _hasStartedSafetyTimer = true;
+      _safetyTimer = Timer(_config.safetyTimeout, _startCatchingUp);
     }
 
     if (_deferred.isEmpty) {
@@ -875,15 +1083,18 @@ class _ProgressiveFill {
     }
     _pendingBatch.addAll(batch);
     _markAdapterNeedsLayout();
+    _timeNextFrame();
   }
 
   void _complete() {
     _isComplete = true;
     _safetyTimer?.cancel();
     _safetyTimer = null;
+    _cancelFrameTiming();
     _stopWaitingForScrollEnd();
     _pending.clear();
     _pendingBatch.clear();
+    _deferredIndices = null;
     _config.controller?._isComplete._set(true);
   }
 
@@ -908,19 +1119,23 @@ class _ProgressiveFill {
   /// The nodes around the viewport, from half a viewport above it to a viewport below it,
   /// come first, then the rest of the nodes below the viewport, and then the rest above
   /// it, each nearest first. While the user scrolls, only the nodes around the viewport
-  /// are built. While an animation drives the scroll offset, no node above the viewport is
-  /// built.
+  /// are built, until the safety timeout has passed. While an animation drives the scroll
+  /// offset, no node above the viewport is built.
+  ///
+  /// The batch takes nodes until it reaches the work that [_sizeNextBatch] chose for the
+  /// frame budget that applies.
   List<String> _chooseNextBatch() {
+    final position = _scrollPosition;
+    final isScrolling = position?.isScrollingNotifier.value ?? false;
+    final isAnimating = _isAnimationDrivingScrollOffset;
+    _sizeNextBatch(_isCatchingUp && !isScrolling ? _config.catchUpFrameBudget : _config.frameBudget);
+
     final column = _layout._componentColumn;
     final adapter = _layout._progressiveAdapter;
     if (column == null || adapter == null || !_canReadLastLayoutOf(column) || adapter.geometry == null) {
       // We don't know where the nodes are. Build them in order.
-      return _fillBatch(_deferred.toList());
+      return _fillBatch(_deferred);
     }
-
-    final position = _scrollPosition;
-    final isScrolling = position?.isScrollingNotifier.value ?? false;
-    final isAnimating = _isAnimationDrivingScrollOffset;
 
     final constraints = adapter.constraints;
     final columnTop = _columnTopInSliver(column);
@@ -929,13 +1144,17 @@ class _ProgressiveFill {
     final windowTop = viewportTop - viewportExtent * 0.5;
     final windowBottom = viewportTop + viewportExtent * 1.5;
 
-    final childCount = column.childCount;
     final firstIndexBelow = _firstChildEndingBelow(column, viewportTop);
+    final deferredIndices = _obtainDeferredIndices();
+    final firstDeferredBelow = _lowerBound(deferredIndices, firstIndexBelow);
 
     final batch = <String>[];
-    var characterCount = 0;
-    bool isFull() => batch.length >= _batchNodeCount || characterCount >= _batchCharacterCount;
+    var units = 0.0;
+    bool isFull() => units >= _batchUnits;
     void consider(int index) {
+      if (index >= column.childCount) {
+        return;
+      }
       final child = column.childAt(index);
       if (child is! _RenderComponentSlot || !child.isPlaceholder || !_deferred.contains(child.nodeId)) {
         return;
@@ -945,32 +1164,37 @@ class _ProgressiveFill {
         return;
       }
       batch.add(child.nodeId);
-      final viewModel = child.viewModel;
-      characterCount += viewModel != null ? _characterCount(viewModel) : 1;
+      units += _workUnitsOf(child.viewModel);
     }
 
     // The window around the viewport, below it first.
-    int below = firstIndexBelow;
-    while (below < childCount && !isFull() && column.childRectAt(below).top < windowBottom) {
-      consider(below);
+    int below = firstDeferredBelow;
+    while (below < deferredIndices.length &&
+        !isFull() &&
+        deferredIndices[below] < column.childCount &&
+        column.childRectAt(deferredIndices[below]).top < windowBottom) {
+      consider(deferredIndices[below]);
       below += 1;
     }
-    int above = firstIndexBelow - 1;
+    int above = firstDeferredBelow - 1;
     if (!isAnimating) {
-      while (above >= 0 && !isFull() && column.childRectAt(above).bottom > windowTop) {
-        consider(above);
+      while (above >= 0 &&
+          !isFull() &&
+          deferredIndices[above] < column.childCount &&
+          column.childRectAt(deferredIndices[above]).bottom > windowTop) {
+        consider(deferredIndices[above]);
         above -= 1;
       }
     }
 
-    if (!isScrolling) {
-      while (below < childCount && !isFull()) {
-        consider(below);
+    if (!isScrolling || _isCatchingUp) {
+      while (below < deferredIndices.length && !isFull()) {
+        consider(deferredIndices[below]);
         below += 1;
       }
       if (!isAnimating) {
         while (above >= 0 && !isFull()) {
-          consider(above);
+          consider(deferredIndices[above]);
           above -= 1;
         }
       }
@@ -984,7 +1208,7 @@ class _ProgressiveFill {
 
       // Every deferred node should have a placeholder in the column, but if one doesn't,
       // build it anyway, so that the fill always completes.
-      return _fillBatch(_deferred.toList());
+      return _fillBatch(_deferred);
     }
     return batch;
   }
@@ -1018,16 +1242,17 @@ class _ProgressiveFill {
     return false;
   }
 
-  List<String> _fillBatch(List<String> candidates) {
+  /// Returns the first of the [candidates] that fit in the next batch.
+  List<String> _fillBatch(Iterable<String> candidates) {
     final batch = <String>[];
-    var characterCount = 0;
+    var units = 0.0;
+    final viewModel = _layout.widget.presenter.viewModel;
     for (final nodeId in candidates) {
-      if (batch.length >= _batchNodeCount || characterCount >= _batchCharacterCount) {
+      if (units >= _batchUnits) {
         break;
       }
       batch.add(nodeId);
-      final viewModel = _layout.widget.presenter.viewModel.getComponentViewModelByNodeId(nodeId);
-      characterCount += viewModel != null ? _characterCount(viewModel) : 1;
+      units += _workUnitsOf(viewModel.getComponentViewModelByNodeId(nodeId));
     }
     return batch;
   }

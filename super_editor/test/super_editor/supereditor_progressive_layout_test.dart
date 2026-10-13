@@ -1,6 +1,7 @@
 import 'dart:math';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_test_robots/flutter_test_robots.dart';
@@ -420,17 +421,138 @@ void main() {
         expect(harness.builtNodeIds().length, 400);
         expect(harness.controller.isComplete.value, isTrue);
       });
+    });
 
-      testWidgets("build everything after the safety timeout", (tester) async {
+    group("schedules batches >", () {
+      testWidgets("of one node per frame for a frame budget of zero", (tester) async {
+        final harness = await _pumpEditor(tester, document: _createDocument(), frameBudget: Duration.zero);
+
+        for (int frame = 0; frame < 20; frame += 1) {
+          final builtBefore = harness.builtNodeIds().length;
+          await tester.pump(const Duration(milliseconds: 16));
+          expect(harness.builtNodeIds().length - builtBefore, 1, reason: "Frame $frame");
+        }
+        expect(harness.controller.isComplete.value, isFalse);
+      });
+
+      testWidgets("that grow, twice per frame at most, while the frames stay under the budget", (tester) async {
+        // A budget that no frame of this test reaches.
+        final harness = await _pumpEditor(tester, document: _createDocument(), frameBudget: const Duration(seconds: 5));
+
+        final builtPerFrame = await harness.pumpUntilCompleteCountingBuilds(tester);
+
+        // The batches doubled, until the last one, which built what was left.
+        expect(builtPerFrame.length, inInclusiveRange(3, 8));
+        for (int frame = 1; frame < builtPerFrame.length - 1; frame += 1) {
+          expect(builtPerFrame[frame], greaterThan(builtPerFrame[frame - 1]), reason: "Frame $frame: $builtPerFrame");
+          // The batches double their work, which is about twice the nodes, unless the nodes
+          // of a batch are shorter than those of the last one.
+          expect(builtPerFrame[frame], lessThanOrEqualTo(builtPerFrame[frame - 1] * 3),
+              reason: "Frame $frame: $builtPerFrame");
+        }
+      });
+
+      testWidgets("that leave room for the rest of the frame", (tester) async {
+        // The frames spend 40 milliseconds painting something else, besides the document.
+        Future<int> largestBatch({required bool withSlowPainter}) async {
+          final harness = await _pumpEditor(
+            tester,
+            document: _createDocument(paragraphCount: 1000),
+            frameBudget: const Duration(milliseconds: 60),
+            above: withSlowPainter ? const _SlowPainter(paintTime: Duration(milliseconds: 40)) : null,
+          );
+          final builtPerFrame = await harness.pumpUntilCompleteCountingBuilds(tester);
+          await tester.pumpWidget(const SizedBox());
+          return builtPerFrame.reduce(max);
+        }
+
+        final withoutSlowPainter = await largestBatch(withSlowPainter: false);
+        final withSlowPainter = await largestBatch(withSlowPainter: true);
+
+        // The batches leave the time that the rest of the frame takes, so they're about a third.
+        expect(withSlowPainter, lessThan(withoutSlowPainter * 0.75));
+      });
+
+      testWidgets("after the safety timeout, that grow, and finish without a frame that builds everything", (
+        tester,
+      ) async {
         final harness = await _pumpEditor(
           tester,
           document: _createDocument(),
           safetyTimeout: const Duration(milliseconds: 500),
-          // Batches so small, and slow, that the fill wouldn't finish before the timeout.
+          // Batches of one node until the timeout.
           frameBudget: Duration.zero,
         );
 
-        await tester.pump(const Duration(milliseconds: 600));
+        // Until the timeout, which counts from the end of the first frame, the frames build
+        // a node each.
+        final firstFrameEnd = tester.binding.clock.now();
+        while (tester.binding.clock.now().difference(firstFrameEnd) < const Duration(milliseconds: 500)) {
+          final builtBefore = harness.builtNodeIds().length;
+          await tester.pump(const Duration(milliseconds: 16));
+          expect(harness.builtNodeIds().length - builtBefore, lessThanOrEqualTo(1));
+        }
+        await tester.pump(const Duration(milliseconds: 16));
+        final remainingAtTimeout = 400 - harness.builtNodeIds().length;
+        expect(remainingAtTimeout, greaterThan(300));
+
+        // After it, the batches grow, from the size of the batches before it, and finish
+        // over several frames.
+        final builtPerFrame = await harness.pumpUntilCompleteCountingBuilds(tester);
+        expect(builtPerFrame.first, lessThan(10));
+        expect(builtPerFrame.reduce(max), lessThan(remainingAtTimeout));
+        expect(builtPerFrame.reduce(max), greaterThan(builtPerFrame.first * 4));
+        expect(builtPerFrame.length, lessThan(30));
+        expect(harness.builtNodeIds().length, 400);
+      });
+
+      testWidgets("after the safety timeout, while the user drags, and keeps the visible content still", (
+        tester,
+      ) async {
+        final harness = await _pumpEditor(
+          tester,
+          document: _createDocument(),
+          initialScrollOffset: 6000,
+          safetyTimeout: const Duration(milliseconds: 500),
+        );
+
+        // Drag, and hold the finger down, so that the user scrolls until the fill finishes.
+        final gesture = await tester.startGesture(const Offset(400, 300));
+        for (int i = 0; i < 5; i += 1) {
+          await gesture.moveBy(const Offset(0, 40));
+          await tester.pump(const Duration(milliseconds: 16));
+        }
+        // Before the timeout, the layout builds only around the viewport.
+        for (int i = 0; i < 20; i += 1) {
+          await tester.pump(const Duration(milliseconds: 16));
+        }
+        expect(harness.controller.isComplete.value, isFalse);
+
+        // After it, the layout builds the rest, while the finger is still down, without
+        // moving what's visible.
+        await tester.pump(const Duration(milliseconds: 500));
+        final visibleRects = harness.visibleComponentGlobalRects(tester);
+        expect(visibleRects, isNotEmpty);
+        var frames = 0;
+        while (!harness.controller.isComplete.value) {
+          await tester.pump(const Duration(milliseconds: 16));
+          frames += 1;
+          expect(frames, lessThan(500));
+          for (final entry in visibleRects.entries) {
+            expect(harness.componentGlobalRect(entry.key), _rectMoreOrLessEquals(entry.value), reason: entry.key);
+          }
+        }
+
+        await gesture.up();
+        await tester.pumpAndSettle();
+      });
+
+      testWidgets("and completeNow() still builds everything in the next frame", (tester) async {
+        final harness = await _pumpEditor(tester, document: _createDocument(), frameBudget: Duration.zero);
+        await tester.pump(const Duration(milliseconds: 16));
+        await tester.pump(const Duration(milliseconds: 16));
+
+        harness.controller.completeNow();
         await tester.pump();
 
         expect(harness.builtNodeIds().length, 400);
@@ -1007,6 +1129,8 @@ Future<_Harness> _pumpEditor(
   Duration frameBudget = const Duration(milliseconds: 6),
   Iterable<String>? Function(String nodeId)? buildTogether,
   List<ComponentBuilder>? componentBuilders,
+  // A widget above the editor.
+  Widget? above,
 }) async {
   final controller = SingleColumnProgressiveLayoutController();
   addTearDown(controller.dispose);
@@ -1036,7 +1160,13 @@ Future<_Harness> _pumpEditor(
     superEditor = SuperEditorDryLayout(controller: scrollController, superEditor: superEditor);
   }
 
-  await tester.pumpWidget(MaterialApp(home: Scaffold(body: superEditor)));
+  await tester.pumpWidget(
+    MaterialApp(
+      home: Scaffold(
+        body: above != null ? Column(children: [above, Expanded(child: superEditor)]) : superEditor,
+      ),
+    ),
+  );
 
   return _Harness(
     document: document,
@@ -1094,6 +1224,25 @@ class _Harness {
     final frames = await _pumpUntil(tester, () => controller.isComplete.value);
     expect(tester.takeException(), isNull);
     return frames;
+  }
+
+  /// Pumps frames until every node is built, and returns the number of nodes that each
+  /// frame built.
+  Future<List<int>> pumpUntilCompleteCountingBuilds(WidgetTester tester) async {
+    final builtPerFrame = <int>[];
+    while (!controller.isComplete.value) {
+      if (builtPerFrame.length >= 2000) {
+        fail("The layout didn't build every node after 2000 frames");
+      }
+      final builtBefore = builtNodeIds().length;
+      await tester.pump(const Duration(milliseconds: 16));
+      final built = builtNodeIds().length - builtBefore;
+      if (built > 0 || !controller.isComplete.value) {
+        builtPerFrame.add(built);
+      }
+    }
+    expect(tester.takeException(), isNull);
+    return builtPerFrame;
   }
 
   /// Expects that the column of components stacks its children from top to bottom,
@@ -1220,6 +1369,45 @@ class _RectMoreOrLessEquals extends Matcher {
 
   @override
   Description describe(Description description) => description.add("a rect close to $expected");
+}
+
+/// Paints nothing, slowly, in every frame.
+class _SlowPainter extends LeafRenderObjectWidget {
+  const _SlowPainter({required this.paintTime});
+
+  final Duration paintTime;
+
+  @override
+  RenderObject createRenderObject(BuildContext context) => _RenderSlowPainter(paintTime);
+}
+
+class _RenderSlowPainter extends RenderBox {
+  _RenderSlowPainter(this.paintTime);
+
+  final Duration paintTime;
+
+  @override
+  bool get isRepaintBoundary => true;
+
+  @override
+  void performLayout() {
+    size = constraints.constrain(const Size(double.infinity, 10));
+  }
+
+  @override
+  void paint(PaintingContext context, Offset offset) {
+    final stopwatch = Stopwatch()..start();
+    while (stopwatch.elapsed < paintTime) {
+      // Wait.
+    }
+
+    // Paint again in the next frame.
+    SchedulerBinding.instance.addPostFrameCallback((_) {
+      if (attached) {
+        markNeedsPaint();
+      }
+    });
+  }
 }
 
 /// Builds horizontal rules that can't be selected visually.
