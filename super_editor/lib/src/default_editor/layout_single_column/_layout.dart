@@ -2210,7 +2210,12 @@ class RenderDocumentComponentColumn extends RenderFlex {
   }
 
   /// Lays out the [slots], with the constraints that [RenderFlex] gives every child,
-  /// centers them, and moves the children below them by how much their heights changed.
+  /// centers them, and moves the children below them to the bottom of the child above.
+  ///
+  /// Each child's top is the bottom of the child above it, summed from the top in the same
+  /// order as [RenderFlex] sums them, so that the children end up exactly where a layout of
+  /// every child puts them, however many layouts of only some slots came before, rather than
+  /// off by the rounding of the changes in height that moved them.
   void _layOutOnlySlots(Set<_RenderComponentSlot> slots) {
     final children = _children;
     final indices = <int>[
@@ -2220,34 +2225,40 @@ class RenderDocumentComponentColumn extends RenderFlex {
 
     final width = constraints.maxWidth;
     final childConstraints = BoxConstraints(maxWidth: width);
-    var shift = 0.0;
+    // The top of the next child: the bottom of the child above it, once that child was laid
+    // out, or moved.
+    double? nextTop;
     var next = 0;
     for (int index = indices.isEmpty ? children.length : indices.first; index < children.length; index += 1) {
       final child = children[index];
       final parentData = child.parentData! as FlexParentData;
       if (next < indices.length && indices[next] == index) {
         next += 1;
-        final top = parentData.offset.dy + shift;
-        final previousHeight = child.size.height;
+        final top = nextTop ?? parentData.offset.dy;
         child.layout(childConstraints, parentUsesSize: true);
         final childSize = child.size;
-        shift += childSize.height - previousHeight;
         parentData.offset = Offset((width - childSize.width) / 2.0, top);
+        nextTop = top + childSize.height;
         _childrenWithStalePaintRects.add(index);
         continue;
       }
 
-      if (shift == 0) {
+      if (nextTop == parentData.offset.dy) {
+        // This child, and the ones below it, down to the next slot to lay out, stay where
+        // they are.
         if (next >= indices.length) {
-          // Nothing below this child moves.
           break;
         }
+        nextTop = null;
+        index = indices[next] - 1;
         continue;
       }
-      parentData.offset = Offset(parentData.offset.dx, parentData.offset.dy + shift);
+      parentData.offset = Offset(parentData.offset.dx, nextTop!);
+      nextTop = nextTop + child.size.height;
     }
 
-    _contentHeight += shift;
+    final lastChild = children.last;
+    _contentHeight = (lastChild.parentData! as FlexParentData).offset.dy + lastChild.size.height;
     size = constraints.constrain(Size(width, _contentHeight));
   }
 
