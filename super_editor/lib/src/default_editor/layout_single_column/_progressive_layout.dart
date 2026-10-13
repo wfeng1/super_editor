@@ -14,7 +14,12 @@ part of '_layout.dart';
 /// the batch took, and grows the next batch while the frames stay under the budget. Once
 /// [safetyTimeout] has passed, the batches are sized to [catchUpFrameBudget] instead, and
 /// they go on while the user scrolls, so that the layout always finishes, without a frame
-/// that builds everything at once.
+/// that builds everything at once, even when the rest of every frame takes longer than the
+/// budget.
+///
+/// Should the layout stop building nodes, for any reason, for a few frames in a row while
+/// no animation drives the scroll offset, it builds the rest in document order, in batches,
+/// as if the app had asked for them, so that it never stalls with nodes that aren't built.
 ///
 /// The visible content doesn't move while the rest is built:
 ///
@@ -73,6 +78,15 @@ class SingleColumnProgressiveLayout {
   @visibleForTesting
   static bool debugProgressiveByDefault = false;
 
+  /// When `true`, the layouts don't build the batches that they choose, as if something kept
+  /// them from it, so that tests can check that a layout that stops building nodes still
+  /// builds every node.
+  ///
+  /// The nodes that become visible, the ones that are asked for, and the batches that a
+  /// layout builds once it stopped building nodes, are still built.
+  @visibleForTesting
+  static bool debugIgnoreChosenBatches = false;
+
   /// Estimates the height of the component for [viewModel], when it's laid out at the
   /// given content [width], which excludes the view model's padding, or returns `null`
   /// to use the built-in estimate.
@@ -129,6 +143,12 @@ class SingleColumnProgressiveLayout {
   ///
   /// A larger budget finishes sooner, because each frame has a fixed cost, besides its
   /// batch, while a smaller one keeps animations smoother in the meantime.
+  ///
+  /// Once [safetyTimeout] has passed, a batch takes at least as long as the rest of its
+  /// frame, up to the whole budget, which applies while the user scrolls, too. Otherwise, a
+  /// frame whose other work takes the whole budget, e.g., in a debug build that updates the
+  /// semantics of a long document, would build a single node, and a long document would
+  /// take thousands of frames to finish.
   final Duration catchUpFrameBudget;
 
   /// Returns the IDs of the nodes that must be built in the same frame as the node with
@@ -388,6 +408,31 @@ class _ProgressiveFill {
 
   /// The scroll position whose scrolling this fill waits to end before it builds more.
   ScrollPosition? _waitingForScrollEndOf;
+
+  /// The number of nodes that were built since the first frame, which tells whether a frame
+  /// that was asked to build nodes built any.
+  int _builtNodeCount = 0;
+
+  /// The [_builtNodeCount] when this fill last asked the next frame to build nodes, or `null`
+  /// if it didn't since the last frame.
+  int? _builtNodeCountWhenBuildWasRequested;
+
+  /// The number of frames in a row that were asked to build nodes, and built none, while no
+  /// animation drove the scroll offset.
+  int _framesWithoutProgress = 0;
+
+  /// Whether this fill stopped building nodes for [_maxFramesWithoutProgress] frames in a
+  /// row, after which it builds the rest in document order, in batches, as if they were asked
+  /// for.
+  bool _isForcingProgress = false;
+
+  /// The number of frames in a row that may be asked to build nodes, and build none, before
+  /// this fill builds the rest as if they were asked for.
+  static const _maxFramesWithoutProgress = 3;
+
+  /// The least work of a batch once this fill builds the rest as if it was asked for, in the
+  /// units of [_workUnitsOf]: about 16 nodes of 150 characters each.
+  static const _minForcedBatchUnits = 4000.0;
 
   /// Whether every node was built, after which the layout behaves as if it never laid
   /// out progressively.
@@ -663,7 +708,9 @@ class _ProgressiveFill {
 
     final requestedNodes = <String>{..._pending};
     _pending.clear();
-    final batch = <String>{..._pendingBatch};
+    final batch = <String>{
+      if (!SingleColumnProgressiveLayout.debugIgnoreChosenBatches || _isForcingProgress) ..._pendingBatch,
+    };
     _pendingBatch.clear();
 
     // Builds the deferred nodes in the visible region, and in the cache extent below it,
@@ -865,6 +912,7 @@ class _ProgressiveFill {
       }
       _removeDeferredIndex(nodeId);
       _builtSinceMeasuring.add(nodeId);
+      _builtNodeCount += 1;
       _unitsBuiltThisFrame += _workUnitsOf(viewModel.getComponentViewModelByNodeId(nodeId));
       builders.addAll(_layout._componentBuilderRegistry.buildersOf(nodeId));
 
@@ -1035,6 +1083,11 @@ class _ProgressiveFill {
   /// frames took, and the rest of those frames, to at most twice what the last frame that
   /// built a batch built, and to at least one node.
   ///
+  /// While [_isCatchingUp], or [_isForcingProgress], the batch takes at least as long as
+  /// the rest of the frame, up to the whole [frameBudget], so that a frame whose other work
+  /// takes the whole budget still builds a good part of what's left, rather than a single
+  /// node.
+  ///
   /// The size changes only after a frame that built a batch was measured, so that a batch
   /// grows by at most twice per frame that built one.
   void _sizeNextBatch(Duration frameBudget) {
@@ -1045,7 +1098,12 @@ class _ProgressiveFill {
     }
     _hasMeasuredBatchFrameSinceSizing = false;
 
-    final available = frameBudget.inMicroseconds - (_frameOverheadMicroseconds ?? 0);
+    final budget = frameBudget.inMicroseconds.toDouble();
+    final overhead = _frameOverheadMicroseconds ?? 0;
+    var available = budget - overhead;
+    if (_isCatchingUp || _isForcingProgress) {
+      available = max(available, min(overhead, budget));
+    }
     final units = available / microsecondsPerUnit;
     _batchUnits = units.clamp(1.0, max(_unitsOfLastBatchFrame * 2, 1.0));
   }
@@ -1071,9 +1129,23 @@ class _ProgressiveFill {
       return;
     }
 
+    _checkProgress();
+
     if (_pending.isNotEmpty) {
       // Something asked for nodes during the last frame.
-      _markAdapterNeedsLayout();
+      _requestBuild();
+      return;
+    }
+
+    if (_isForcingProgress) {
+      // This fill stopped building nodes. Build the rest in document order, as if they were
+      // asked for, which builds them in the next layout, whatever else happens.
+      _sizeNextBatch(_config.catchUpFrameBudget);
+      final batch = _fillBatch(_deferred, minUnits: _minForcedBatchUnits);
+      _pending.addAll(batch);
+      _pendingBatch.addAll(batch);
+      _requestBuild();
+      _timeNextFrame();
       return;
     }
 
@@ -1082,8 +1154,44 @@ class _ProgressiveFill {
       return;
     }
     _pendingBatch.addAll(batch);
-    _markAdapterNeedsLayout();
+    _requestBuild();
     _timeNextFrame();
+  }
+
+  /// Lays out the adapter in the next frame, to build the nodes that were asked for, or
+  /// chosen, and remembers how many nodes were built until then, so that the next
+  /// [_checkProgress] can tell whether that frame built any.
+  void _requestBuild() {
+    _builtNodeCountWhenBuildWasRequested = _builtNodeCount;
+    _markAdapterNeedsLayout();
+  }
+
+  /// Counts the frames in a row that were asked to build nodes, and built none, and, after
+  /// [_maxFramesWithoutProgress] of them, makes this fill build the rest as if they were
+  /// asked for.
+  ///
+  /// A frame in which an animation drives the scroll offset doesn't count, because it skips
+  /// the nodes that would move the content that the animation scrolls to, which might be all
+  /// of the nodes that it was asked to build, until the animation ends.
+  void _checkProgress() {
+    final builtNodeCountWhenBuildWasRequested = _builtNodeCountWhenBuildWasRequested;
+    _builtNodeCountWhenBuildWasRequested = null;
+    if (builtNodeCountWhenBuildWasRequested == null || _isForcingProgress) {
+      return;
+    }
+
+    if (_builtNodeCount > builtNodeCountWhenBuildWasRequested) {
+      _framesWithoutProgress = 0;
+      return;
+    }
+    if (_isAnimationDrivingScrollOffset) {
+      return;
+    }
+
+    _framesWithoutProgress += 1;
+    if (_framesWithoutProgress >= _maxFramesWithoutProgress) {
+      _isForcingProgress = true;
+    }
   }
 
   void _complete() {
@@ -1242,13 +1350,15 @@ class _ProgressiveFill {
     return false;
   }
 
-  /// Returns the first of the [candidates] that fit in the next batch.
-  List<String> _fillBatch(Iterable<String> candidates) {
+  /// Returns the first of the [candidates] that fit in the next batch, which holds at least
+  /// [minUnits] of work, when there are enough candidates.
+  List<String> _fillBatch(Iterable<String> candidates, {double minUnits = 0}) {
     final batch = <String>[];
     var units = 0.0;
+    final batchUnits = max(_batchUnits, minUnits);
     final viewModel = _layout.widget.presenter.viewModel;
     for (final nodeId in candidates) {
-      if (units >= _batchUnits) {
+      if (units >= batchUnits) {
         break;
       }
       batch.add(nodeId);

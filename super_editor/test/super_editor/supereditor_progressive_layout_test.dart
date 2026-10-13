@@ -506,6 +506,37 @@ void main() {
         expect(harness.builtNodeIds().length, 400);
       });
 
+      testWidgets(
+          "after the safety timeout, that finish in a few frames, when the rest of every frame takes longer than "
+          "the catch-up budget", (tester) async {
+        // Every frame spends 70 milliseconds on something else, more than the catch-up budget of
+        // 50 milliseconds, as the frames of a long document do in a debug build that updates its
+        // semantics.
+        final harness = await _pumpEditor(
+          tester,
+          document: _createDocument(),
+          safetyTimeout: const Duration(milliseconds: 100),
+          above: const _SlowPainter(paintTime: Duration(milliseconds: 70)),
+        );
+
+        // Until the timeout, which counts from the end of the first frame, the batches leave the
+        // frame budget to the rest of the frame, which takes all of it, so they build a node each.
+        final firstFrameEnd = tester.binding.clock.now();
+        await _pumpUntil(
+          tester,
+          () => tester.binding.clock.now().difference(firstFrameEnd) > const Duration(milliseconds: 100),
+        );
+        final remainingAtTimeout = 400 - harness.builtNodeIds().length;
+        expect(remainingAtTimeout, greaterThan(300));
+
+        // After it, the batches take as long as the rest of the frame, up to the catch-up budget,
+        // rather than a node each, and they finish in a few frames.
+        final builtPerFrame = await harness.pumpUntilCompleteCountingBuilds(tester);
+        expect(builtPerFrame.length, lessThan(40), reason: "$builtPerFrame");
+        expect(builtPerFrame.reduce(max), greaterThan(10), reason: "$builtPerFrame");
+        expect(harness.builtNodeIds().length, 400);
+      });
+
       testWidgets("after the safety timeout, while the user drags, and keeps the visible content still", (
         tester,
       ) async {
@@ -557,6 +588,63 @@ void main() {
 
         expect(harness.builtNodeIds().length, 400);
         expect(harness.controller.isComplete.value, isTrue);
+      });
+
+      testWidgets("that build the rest in document order, in batches, when they stop building nodes", (
+        tester,
+      ) async {
+        // The layout chooses its batches, and then doesn't build them.
+        SingleColumnProgressiveLayout.debugIgnoreChosenBatches = true;
+        addTearDown(() => SingleColumnProgressiveLayout.debugIgnoreChosenBatches = false);
+        final harness = await _pumpEditor(tester, document: _createDocument(), initialScrollOffset: 3000);
+        final visibleRects = harness.visibleComponentGlobalRects(tester);
+        expect(visibleRects, isNotEmpty);
+
+        final builtPerFrame = <int>[];
+        while (!harness.controller.isComplete.value) {
+          expect(builtPerFrame.length, lessThan(100), reason: "$builtPerFrame");
+          final builtBefore = harness.builtNodeIds().length;
+          await tester.pump(const Duration(milliseconds: 16));
+          builtPerFrame.add(harness.builtNodeIds().length - builtBefore);
+          for (final entry in visibleRects.entries) {
+            expect(harness.componentGlobalRect(entry.key), _rectMoreOrLessEquals(entry.value), reason: entry.key);
+          }
+        }
+
+        // A few frames build nothing, and then the layout builds the rest, above the visible
+        // content, too, a batch of several nodes at a time.
+        final framesWithoutProgress = builtPerFrame.takeWhile((built) => built == 0).length;
+        expect(framesWithoutProgress, inInclusiveRange(2, 4), reason: "$builtPerFrame");
+        expect(builtPerFrame.skip(framesWithoutProgress).first, greaterThan(5), reason: "$builtPerFrame");
+        expect(harness.builtNodeIds().length, 400);
+        expect(tester.takeException(), isNull);
+      });
+
+      testWidgets("that build the hidden nodes, which have an estimate of zero, and draw nothing", (tester) async {
+        // Five nodes that draw nothing after every ten paragraphs, like the lines of a collapsed
+        // toggle, and at the end of the document.
+        final document = MutableDocument(
+          nodes: [
+            for (int i = 0; i < 400; i += 1)
+              i % 15 >= 10 || i >= 395
+                  ? HorizontalRuleNode(id: "$i")
+                  : ParagraphNode(id: "$i", text: AttributedText("Paragraph $i. ${"Lorem ipsum. " * (i % 7)}")),
+          ],
+        );
+        final harness = await _pumpEditor(
+          tester,
+          document: document,
+          componentBuilders: [const _HiddenHorizontalRuleComponentBuilder(), ...defaultComponentBuilders],
+          estimateHeight: (viewModel, width) => viewModel is HorizontalRuleComponentViewModel ? 0 : null,
+          safetyTimeout: const Duration(milliseconds: 500),
+        );
+        expect(harness.builtNodeIds().length, lessThan(100));
+
+        await harness.pumpUntilComplete(tester);
+
+        expect(harness.builtNodeIds().length, 400);
+        harness.expectColumnIsStacked();
+        expect(harness.column.childRectAt(397).height, 0);
       });
     });
 
@@ -1128,6 +1216,7 @@ Future<_Harness> _pumpEditor(
   Duration safetyTimeout = const Duration(minutes: 5),
   Duration frameBudget = const Duration(milliseconds: 6),
   Iterable<String>? Function(String nodeId)? buildTogether,
+  double? Function(SingleColumnLayoutComponentViewModel viewModel, double width)? estimateHeight,
   List<ComponentBuilder>? componentBuilders,
   // A widget above the editor.
   Widget? above,
@@ -1145,6 +1234,7 @@ Future<_Harness> _pumpEditor(
     safetyTimeout: safetyTimeout,
     frameBudget: frameBudget,
     buildTogether: buildTogether,
+    estimateHeight: estimateHeight,
   );
   Widget superEditor = SuperEditor(
     editor: editor,
@@ -1432,6 +1522,33 @@ class _UnselectableHorizontalRuleComponentBuilder implements ComponentBuilder {
       key: componentContext.componentKey,
       isVisuallySelectable: false,
       child: const SizedBox(height: 40),
+    );
+  }
+}
+
+/// Builds horizontal rules that draw nothing, and can't be selected, like the lines that an
+/// app hides, e.g., in a collapsed toggle.
+class _HiddenHorizontalRuleComponentBuilder implements ComponentBuilder {
+  const _HiddenHorizontalRuleComponentBuilder();
+
+  @override
+  SingleColumnLayoutComponentViewModel? createViewModel(Document document, DocumentNode node) {
+    return const HorizontalRuleComponentBuilder().createViewModel(document, node);
+  }
+
+  @override
+  Widget? createComponent(
+    SingleColumnDocumentComponentContext componentContext,
+    SingleColumnLayoutComponentViewModel componentViewModel,
+  ) {
+    if (componentViewModel is! HorizontalRuleComponentViewModel) {
+      return null;
+    }
+
+    return BoxComponent(
+      key: componentContext.componentKey,
+      isVisuallySelectable: false,
+      child: const SizedBox(),
     );
   }
 }
