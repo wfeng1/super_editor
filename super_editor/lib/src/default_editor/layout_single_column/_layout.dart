@@ -143,6 +143,10 @@ class _SingleColumnDocumentLayoutState extends State<SingleColumnDocumentLayout>
   /// Whether this layout built its components at least once.
   bool _hasBuiltComponents = false;
 
+  /// The padding around the components, from the presenter's view model, when this
+  /// layout last built.
+  EdgeInsetsGeometry? _builtPadding;
+
   late SingleColumnLayoutPresenterChangeListener _presenterListener;
 
   /// The component builders in the tree, by node ID, so that this layout's one
@@ -277,6 +281,10 @@ class _SingleColumnDocumentLayoutState extends State<SingleColumnDocumentLayout>
         // if its view model changed.
         _checkEveryComponentInNextBuild = true;
       });
+    } else if (widget.presenter.viewModel.padding != _builtPadding) {
+      // Only the padding around the components changed, e.g., the stylesheet's document
+      // padding. Pad the same components.
+      setState(() {});
     }
 
     // Rebuild the components whose view models changed.
@@ -1077,9 +1085,10 @@ class _SingleColumnDocumentLayoutState extends State<SingleColumnDocumentLayout>
       _startProgressiveLayoutIfPossible();
     }
 
+    _builtPadding = widget.presenter.viewModel.padding;
     Widget result = Padding(
       key: _boxKey,
-      padding: widget.presenter.viewModel.padding,
+      padding: _builtPadding!,
       child: _DocumentComponentColumn(
         children: _buildDocComponents(),
       ),
@@ -1579,9 +1588,15 @@ class _PresenterComponentBuilderState extends State<_PresenterComponentBuilder> 
 
   void _onViewModelChange() {
     setState(() {
-      // Re-build.
+      // The presenter reports that the component looks different, which it can tell
+      // better than [_isSameViewModel], e.g., when only an inline text style changed.
+      _isViewModelChangeReported = true;
     });
   }
+
+  /// Whether the presenter reported that this builder's view model changed since the
+  /// component was last built, so that the component must be built again.
+  bool _isViewModelChangeReported = false;
 
   /// Rebuilds, e.g., to build the component instead of a placeholder.
   void _rebuild() {
@@ -1655,7 +1670,10 @@ class _PresenterComponentBuilderState extends State<_PresenterComponentBuilder> 
     // doesn't cover everything that a new presenter, e.g., one with a new stylesheet,
     // might change.
     final component = _component;
+    final isViewModelChangeReported = _isViewModelChangeReported;
+    _isViewModelChangeReported = false;
     if (component != null &&
+        !isViewModelChangeReported &&
         identical(_componentPresenter, widget.presenter) &&
         identical(_componentKey, widget.componentKey) &&
         (identical(_componentBuilders, widget.componentBuilders) ||

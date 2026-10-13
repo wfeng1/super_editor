@@ -566,7 +566,10 @@ class SuperEditorState extends State<SuperEditor> {
         _docLayoutSelectionStyler.selectionStyles = widget.selectionStyles;
       }
       if (widget.stylesheet != oldWidget.stylesheet) {
-        _createLayoutPresenter();
+        // Restyle with the existing presenter, which builds only the components that look
+        // different again, rather than a new presenter, which would build every component.
+        _docStylesheetStyler.stylesheet = widget.stylesheet;
+        _docLayoutSelectionStyler.selectedTextColorStrategy = widget.stylesheet.selectedTextColorStrategy;
       }
     }
 

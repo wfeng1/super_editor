@@ -284,9 +284,13 @@ class SingleColumnLayoutPresenter {
   }) {
     editorLayoutLog.finer("Computing layout view model changes to notify listeners of those changes.");
 
+    // The layout pads its components with the view model's padding, e.g., the stylesheet's
+    // document padding, which can change while no component does.
+    final didPaddingChange = oldViewModel.padding != newViewModel.padding;
+
     final changedInPlace = _changedInPlace(oldViewModel, newViewModel);
     if (changedInPlace != null) {
-      if (changedInPlace.isEmpty) {
+      if (changedInPlace.isEmpty && !didPaddingChange) {
         editorLayoutLog.fine("Nothing has changed in the view model. Not notifying any listeners.");
         return;
       }
@@ -397,7 +401,11 @@ class SingleColumnLayoutPresenter {
       }
     }
 
-    if (addedComponents.isEmpty && movedComponents.isEmpty && changedComponents.isEmpty && removedComponents.isEmpty) {
+    if (addedComponents.isEmpty &&
+        movedComponents.isEmpty &&
+        changedComponents.isEmpty &&
+        removedComponents.isEmpty &&
+        !didPaddingChange) {
       // No changes to report.
       editorLayoutLog.fine("Nothing has changed in the view model. Not notifying any listeners.");
       return;
@@ -418,9 +426,10 @@ class SingleColumnLayoutPresenter {
     }
   }
 
-  /// The components of [newViewModel] that changed from [oldViewModel], when
-  /// both have the same nodes in the same order and every component kept its
-  /// type, or `null` otherwise.
+  /// The components of [newViewModel] that look different from those of
+  /// [oldViewModel], as [SingleColumnLayoutComponentViewModel.looksTheSameAs]
+  /// tells, when both have the same nodes in the same order and every component
+  /// kept its type, or `null` otherwise.
   List<String>? _changedInPlace(SingleColumnLayoutViewModel oldViewModel, SingleColumnLayoutViewModel newViewModel) {
     final oldComponents = oldViewModel.componentViewModels;
     final newComponents = newViewModel.componentViewModels;
@@ -435,7 +444,7 @@ class SingleColumnLayoutPresenter {
       if (oldComponent.nodeId != newComponent.nodeId || oldComponent.runtimeType != newComponent.runtimeType) {
         return null;
       }
-      if (oldComponent != newComponent) {
+      if (!oldComponent.looksTheSameAs(newComponent)) {
         changed.add(newComponent.nodeId);
       }
     }
@@ -654,6 +663,15 @@ abstract class SingleColumnLayoutComponentViewModel {
   }
 
   SingleColumnLayoutComponentViewModel copy();
+
+  /// Whether a component built from this view model looks the same as one built from
+  /// [other], which tells the presenter which components to build again when nodes
+  /// weren't added, removed, or moved, e.g., after a style change.
+  ///
+  /// It's [==] by default. A view model whose [==] leaves out something that changes
+  /// how its component looks, e.g., a function that builds its text styles, should
+  /// compare what that something produces, too.
+  bool looksTheSameAs(SingleColumnLayoutComponentViewModel other) => identical(this, other) || this == other;
 
   @override
   bool operator ==(Object other) =>

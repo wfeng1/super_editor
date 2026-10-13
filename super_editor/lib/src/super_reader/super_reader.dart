@@ -27,7 +27,6 @@ import 'package:super_editor/src/default_editor/text/custom_underlines.dart';
 import 'package:super_editor/src/default_editor/unknown_component.dart';
 import 'package:super_editor/src/infrastructure/_logging.dart';
 import 'package:super_editor/src/infrastructure/content_layers.dart';
-import 'package:super_editor/src/infrastructure/content_layers_for_slivers.dart';
 import 'package:super_editor/src/infrastructure/document_gestures_interaction_overrides.dart';
 import 'package:super_editor/src/infrastructure/documents/document_scaffold.dart';
 import 'package:super_editor/src/infrastructure/documents/document_scroller.dart';
@@ -303,7 +302,10 @@ class SuperReaderState extends State<SuperReader> {
     }
 
     if (widget.stylesheet != oldWidget.stylesheet) {
-      _createLayoutPresenter();
+      // Restyle with the existing presenter, which builds only the components that look
+      // different again, rather than a new presenter, which would build every component.
+      _docStylesheetStyler.stylesheet = widget.stylesheet;
+      _docLayoutSelectionStyler.selectedTextColorStrategy = widget.stylesheet.selectedTextColorStrategy;
     }
   }
 
