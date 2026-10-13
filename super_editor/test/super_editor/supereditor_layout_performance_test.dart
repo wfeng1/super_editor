@@ -293,6 +293,133 @@ void main() {
       });
     });
 
+    group("reports semantics of", () {
+      _pinEagerLayout();
+
+      testWidgets("the components around the viewport, as if it reported every component, as the viewport scrolls", (
+        tester,
+      ) async {
+        final scrollController = ScrollController();
+        addTearDown(scrollController.dispose);
+        final document = _createParagraphs(150);
+        final semanticsVisits = <String>[];
+
+        await _pumpEditorInCustomScrollView(
+          tester,
+          document: document,
+          scrollController: scrollController,
+          componentBuilders: [
+            _SemanticsProbeComponentBuilder(semanticsVisits),
+            ...defaultComponentBuilders,
+          ],
+        );
+        _expectSemanticsOfComponentsAroundViewport(tester, document);
+        expect(semanticsVisits.toSet().length, lessThan(document.nodeCount ~/ 2));
+
+        for (final scrollOffset in [1500.0, 4000.0, 2600.0, 0.0]) {
+          semanticsVisits.clear();
+          scrollController.jumpTo(scrollOffset);
+          await tester.pump();
+
+          _expectSemanticsOfComponentsAroundViewport(tester, document);
+          expect(semanticsVisits.toSet().length, lessThan(document.nodeCount ~/ 2));
+        }
+
+        // Scroll a bit at a time, so that the column reports more components only once the
+        // viewport has moved far enough.
+        for (double scrollOffset = 1000; scrollOffset <= 3000; scrollOffset += 150) {
+          scrollController.jumpTo(scrollOffset);
+          await tester.pump();
+
+          _expectSemanticsOfComponentsAroundViewport(tester, document);
+        }
+
+        // Scroll with a drag, too.
+        await tester.drag(find.byType(CustomScrollView), const Offset(0, -700));
+        await tester.pump();
+        _expectSemanticsOfComponentsAroundViewport(tester, document);
+
+        // Let the editor's tap timers expire.
+        await tester.pump(kDoubleTapTimeout);
+      });
+
+      testWidgets("the components that an assistive technology scrolls into view, or shows on screen", (
+        tester,
+      ) async {
+        final scrollController = ScrollController();
+        addTearDown(scrollController.dispose);
+        final document = _createParagraphs(150);
+
+        await _pumpEditorInCustomScrollView(
+          tester,
+          document: document,
+          scrollController: scrollController,
+          componentBuilders: defaultComponentBuilders,
+        );
+
+        // Scroll forward, a page at a time, and back, with the viewport's semantic actions.
+        for (final action in [
+          SemanticsAction.scrollUp,
+          SemanticsAction.scrollUp,
+          SemanticsAction.scrollUp,
+          SemanticsAction.scrollDown,
+        ]) {
+          final scrollOffset = scrollController.offset;
+          final scrollNode = _findSemanticsNode(tester, (node) => node.getSemanticsData().hasAction(action));
+          scrollNode.owner!.performAction(scrollNode.id, action);
+          await tester.pumpAndSettle();
+
+          expect(scrollController.offset, isNot(scrollOffset));
+          _expectSemanticsOfComponentsAroundViewport(tester, document);
+        }
+
+        // Show a component on screen that's in the viewport's cache extent, below the viewport.
+        final viewportRect = tester.getRect(find.byType(CustomScrollView));
+        final nodeId = document.map((node) => node.id).firstWhere((nodeId) {
+          final rect = _componentGlobalRect(tester, nodeId);
+          return rect.top > viewportRect.bottom + 20 &&
+              rect.bottom < viewportRect.bottom + RenderAbstractViewport.defaultCacheExtent - 20;
+        });
+        final paragraphNode = _findSemanticsNode(tester, (node) => _paragraphIdOf(node) == nodeId);
+        expect(paragraphNode.flagsCollection.isHidden, isTrue);
+        paragraphNode.owner!.performAction(paragraphNode.id, SemanticsAction.showOnScreen);
+        await tester.pumpAndSettle();
+
+        expect(_paragraphsInSemanticsTree(tester)[nodeId], isFalse, reason: "Node $nodeId isn't on screen");
+        _expectSemanticsOfComponentsAroundViewport(tester, document);
+      });
+
+      testWidgets("every component when a repaint boundary sits between the column and the viewport", (
+        tester,
+      ) async {
+        final scrollController = ScrollController();
+        addTearDown(scrollController.dispose);
+        final document = _createParagraphs(150);
+        final semanticsVisits = <String>[];
+
+        await _pumpEditorInCustomScrollView(
+          tester,
+          document: document,
+          scrollController: scrollController,
+          componentBuilders: [
+            _SemanticsProbeComponentBuilder(semanticsVisits),
+            ...defaultComponentBuilders,
+          ],
+          // A fade is a repaint boundary, whose picture of the column the viewport can show at
+          // another scroll offset, without painting the column again.
+          wrapEditor: (editor) => SliverFadeTransition(opacity: const AlwaysStoppedAnimation(1.0), sliver: editor),
+        );
+        expect(semanticsVisits.toSet().length, document.nodeCount);
+        _expectSemanticsOfComponentsAroundViewport(tester, document);
+
+        semanticsVisits.clear();
+        scrollController.jumpTo(3000);
+        await tester.pump();
+        expect(semanticsVisits.toSet().length, document.nodeCount);
+        _expectSemanticsOfComponentsAroundViewport(tester, document);
+      });
+    });
+
     group("hit-tests", () {
       testWidgets("the components that scroll into view", (tester) async {
         final scrollController = ScrollController();
@@ -434,6 +561,7 @@ Future<void> _pumpEditorInCustomScrollView(
   required MutableDocument document,
   required ScrollController scrollController,
   required List<ComponentBuilder> componentBuilders,
+  Widget Function(Widget editor)? wrapEditor,
 }) async {
   tester.view
     ..physicalSize = const Size(600, 800)
@@ -450,9 +578,11 @@ Future<void> _pumpEditorInCustomScrollView(
           controller: scrollController,
           slivers: [
             const SliverToBoxAdapter(child: SizedBox(height: 200)),
-            SuperEditor(
-              editor: editor,
-              componentBuilders: componentBuilders,
+            (wrapEditor ?? (editor) => editor)(
+              SuperEditor(
+                editor: editor,
+                componentBuilders: componentBuilders,
+              ),
             ),
             const SliverToBoxAdapter(child: SizedBox(height: 200)),
           ],
@@ -510,6 +640,85 @@ void _expectPaintedExactlyAroundViewport(WidgetTester tester, Document document,
   }
   expect(visibleCount, greaterThan(0));
   expect(paints.toSet().length, lessThan(document.nodeCount ~/ 2));
+}
+
+/// Expects that the semantics tree holds the paragraphs that it would hold if the column of
+/// components reported the semantics of every component: the ones on screen, the ones in
+/// the viewport's cache extent, hidden, and none farther away.
+///
+/// The paragraphs within a few pixels of those regions' edges, where the text that reports
+/// the semantics doesn't fill its component, aren't checked.
+void _expectSemanticsOfComponentsAroundViewport(WidgetTester tester, Document document) {
+  const cacheExtent = RenderAbstractViewport.defaultCacheExtent;
+  const tolerance = 20.0;
+  final viewportRect = tester.getRect(find.byType(CustomScrollView));
+  final reported = _paragraphsInSemanticsTree(tester);
+
+  int visibleCount = 0;
+  for (final node in document) {
+    final rect = _componentGlobalRect(tester, node.id);
+    final isVisible = rect.bottom > viewportRect.top + tolerance && rect.top < viewportRect.bottom - tolerance;
+    final isInCacheExtent =
+        (rect.bottom < viewportRect.top - tolerance && rect.bottom > viewportRect.top - cacheExtent + tolerance) ||
+            (rect.top > viewportRect.bottom + tolerance && rect.top < viewportRect.bottom + cacheExtent - tolerance);
+    final isFarAway = rect.bottom < viewportRect.top - cacheExtent - tolerance ||
+        rect.top > viewportRect.bottom + cacheExtent + tolerance;
+
+    if (isVisible) {
+      visibleCount += 1;
+      expect(reported[node.id], isFalse, reason: "Node ${node.id} is on screen at $rect, but its semantics aren't");
+    } else if (isInCacheExtent) {
+      expect(reported[node.id], isTrue, reason: "Node ${node.id} is in the cache extent at $rect, but not hidden");
+    } else if (isFarAway) {
+      expect(reported.containsKey(node.id), isFalse, reason: "Node ${node.id} is far away at $rect, but reported");
+    }
+  }
+  expect(visibleCount, greaterThan(0));
+}
+
+/// Returns whether each paragraph in the semantics tree, by node ID, is hidden, i.e., off
+/// screen, in the viewport's cache extent.
+Map<String, bool> _paragraphsInSemanticsTree(WidgetTester tester) {
+  final paragraphs = <String, bool>{};
+  _visitSemanticsNodes(tester, (node) {
+    final nodeId = _paragraphIdOf(node);
+    if (nodeId != null) {
+      paragraphs[nodeId] = node.flagsCollection.isHidden;
+    }
+  });
+  return paragraphs;
+}
+
+/// The node ID of the paragraph from [_createParagraphs] whose semantics are [node], if any.
+String? _paragraphIdOf(SemanticsNode node) => RegExp(r"^Paragraph (\d+)\.").firstMatch(node.label)?.group(1);
+
+SemanticsNode _findSemanticsNode(WidgetTester tester, bool Function(SemanticsNode node) test) {
+  final nodes = <SemanticsNode>[];
+  _visitSemanticsNodes(tester, (node) {
+    if (test(node)) {
+      nodes.add(node);
+    }
+  });
+  expect(nodes, isNotEmpty);
+  return nodes.first;
+}
+
+void _visitSemanticsNodes(WidgetTester tester, void Function(SemanticsNode node) visitor) {
+  void visit(SemanticsNode node) {
+    visitor(node);
+    node.visitChildren((child) {
+      visit(child);
+      return true;
+    });
+  }
+
+  visit(tester.binding.renderViews.first.owner!.semanticsOwner!.rootSemanticsNode!);
+}
+
+Rect _componentGlobalRect(WidgetTester tester, String nodeId) {
+  final layout = tester.state(find.byType(SingleColumnDocumentLayout)) as DocumentLayout;
+  final componentBox = layout.getComponentByNodeId(nodeId)!.context.findRenderObject() as RenderBox;
+  return componentBox.localToGlobal(Offset.zero) & componentBox.size;
 }
 
 /// Counts the builds of every paragraph component's widget, and of the text component in
@@ -673,6 +882,65 @@ class _RenderPaintProbe extends RenderProxyBox {
       position: position,
       hitTest: (result, transformed) => child.hitTest(result, position: transformed),
     );
+  }
+}
+
+/// Wraps every default component in a [_SemanticsProbe], which records the node ID of its
+/// component in [semanticsVisits] whenever a semantics update visits the component.
+class _SemanticsProbeComponentBuilder implements ComponentBuilder {
+  const _SemanticsProbeComponentBuilder(this.semanticsVisits);
+
+  final List<String> semanticsVisits;
+
+  @override
+  SingleColumnLayoutComponentViewModel? createViewModel(Document document, DocumentNode node) => null;
+
+  @override
+  Widget? createComponent(
+      SingleColumnDocumentComponentContext componentContext, SingleColumnLayoutComponentViewModel componentViewModel) {
+    for (final builder in defaultComponentBuilders) {
+      final component = builder.createComponent(componentContext, componentViewModel);
+      if (component != null) {
+        return _SemanticsProbe(nodeId: componentViewModel.nodeId, semanticsVisits: semanticsVisits, child: component);
+      }
+    }
+    return null;
+  }
+}
+
+class _SemanticsProbe extends SingleChildRenderObjectWidget {
+  const _SemanticsProbe({
+    required this.nodeId,
+    required this.semanticsVisits,
+    required super.child,
+  });
+
+  final String nodeId;
+  final List<String> semanticsVisits;
+
+  @override
+  RenderObject createRenderObject(BuildContext context) => _RenderSemanticsProbe(nodeId, semanticsVisits);
+
+  @override
+  void updateRenderObject(BuildContext context, _RenderSemanticsProbe renderObject) {
+    renderObject
+      ..nodeId = nodeId
+      ..semanticsVisits = semanticsVisits;
+  }
+}
+
+/// Records its node ID whenever a semantics update finds the semantics of its child, which
+/// asks this box for its clip.
+class _RenderSemanticsProbe extends RenderProxyBox {
+  _RenderSemanticsProbe(this.nodeId, this.semanticsVisits);
+
+  String nodeId;
+  List<String> semanticsVisits;
+
+  @override
+  Rect? describeSemanticsClip(RenderObject? child) {
+    semanticsVisits.add(nodeId);
+    return super.describeSemanticsClip(child);
   }
 }
 

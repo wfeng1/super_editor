@@ -1,6 +1,7 @@
 import 'dart:math';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -1140,6 +1141,67 @@ void main() {
       });
     });
 
+    group("semantics >", () {
+      testWidgets("updates the semantics of only the nodes around the viewport, however long the document is", (
+        tester,
+      ) async {
+        final semanticsVisits = <String>[];
+        final harness = await _pumpEditor(
+          tester,
+          document: _createDocument(paragraphCount: 1000),
+          initialScrollOffset: 20000,
+          componentBuilders: [_SemanticsProbeComponentBuilder(semanticsVisits), ...defaultComponentBuilders],
+        );
+
+        // Every frame that builds a batch visits the semantics of the nodes around the
+        // viewport, not of every node that's built.
+        final visitsPerFrame = <int>[];
+        while (!harness.controller.isComplete.value) {
+          expect(visitsPerFrame.length, lessThan(2000));
+          semanticsVisits.clear();
+          await tester.pump(const Duration(milliseconds: 16));
+          visitsPerFrame.add(semanticsVisits.toSet().length);
+        }
+        expect(visitsPerFrame.reduce(max), lessThan(60), reason: "$visitsPerFrame");
+
+        // So does a frame that scrolls far away, once every node is built.
+        for (final scrollOffset in [60000.0, 100.0]) {
+          semanticsVisits.clear();
+          harness.scrollController.jumpTo(scrollOffset);
+          await tester.pump();
+          expect(semanticsVisits.toSet().length, inInclusiveRange(1, 59));
+        }
+      });
+
+      testWidgets("builds every node in about as many frames as without semantics", semanticsEnabled: false, (
+        tester,
+      ) async {
+        // A budget that a frame which updates the semantics of every node that's built would
+        // soon exceed, in a document this long, so that it would build a node per frame.
+        Future<int> framesToComplete() async {
+          final harness = await _pumpEditor(
+            tester,
+            document: _createDocument(paragraphCount: 6000),
+            frameBudget: const Duration(milliseconds: 30),
+          );
+          final frames = await harness.pumpUntilComplete(tester);
+          await tester.pumpWidget(const SizedBox());
+          return frames;
+        }
+
+        final framesWithoutSemantics = await framesToComplete();
+        final semantics = tester.ensureSemantics();
+        final framesWithSemantics = await framesToComplete();
+        semantics.dispose();
+
+        expect(
+          framesWithSemantics,
+          lessThan(framesWithoutSemantics * 1.25 + 5),
+          reason: "$framesWithSemantics frames with semantics, $framesWithoutSemantics without",
+        );
+      });
+    });
+
     group("builds everything at once >", () {
       testWidgets("when the editor shrink-wraps its content", (tester) async {
         final harness = await _pumpEditor(tester, document: _createDocument(), shrinkWrap: true);
@@ -1523,6 +1585,67 @@ class _UnselectableHorizontalRuleComponentBuilder implements ComponentBuilder {
       isVisuallySelectable: false,
       child: const SizedBox(height: 40),
     );
+  }
+}
+
+/// Wraps every default component in a [_SemanticsProbe], which records the node ID of its
+/// component in [semanticsVisits] whenever a semantics update visits the component.
+class _SemanticsProbeComponentBuilder implements ComponentBuilder {
+  const _SemanticsProbeComponentBuilder(this.semanticsVisits);
+
+  final List<String> semanticsVisits;
+
+  @override
+  SingleColumnLayoutComponentViewModel? createViewModel(Document document, DocumentNode node) => null;
+
+  @override
+  Widget? createComponent(
+    SingleColumnDocumentComponentContext componentContext,
+    SingleColumnLayoutComponentViewModel componentViewModel,
+  ) {
+    for (final builder in defaultComponentBuilders) {
+      final component = builder.createComponent(componentContext, componentViewModel);
+      if (component != null) {
+        return _SemanticsProbe(nodeId: componentViewModel.nodeId, semanticsVisits: semanticsVisits, child: component);
+      }
+    }
+    return null;
+  }
+}
+
+class _SemanticsProbe extends SingleChildRenderObjectWidget {
+  const _SemanticsProbe({
+    required this.nodeId,
+    required this.semanticsVisits,
+    required super.child,
+  });
+
+  final String nodeId;
+  final List<String> semanticsVisits;
+
+  @override
+  RenderObject createRenderObject(BuildContext context) => _RenderSemanticsProbe(nodeId, semanticsVisits);
+
+  @override
+  void updateRenderObject(BuildContext context, _RenderSemanticsProbe renderObject) {
+    renderObject
+      ..nodeId = nodeId
+      ..semanticsVisits = semanticsVisits;
+  }
+}
+
+/// Records its node ID whenever a semantics update finds the semantics of its child, which
+/// asks this box for its clip.
+class _RenderSemanticsProbe extends RenderProxyBox {
+  _RenderSemanticsProbe(this.nodeId, this.semanticsVisits);
+
+  String nodeId;
+  List<String> semanticsVisits;
+
+  @override
+  Rect? describeSemanticsClip(RenderObject? child) {
+    semanticsVisits.add(nodeId);
+    return super.describeSemanticsClip(child);
   }
 }
 

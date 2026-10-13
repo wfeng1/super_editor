@@ -1957,12 +1957,13 @@ class _DocumentComponentColumn extends Flex {
 ///
 /// This box lays out its children exactly like a [RenderFlex] for a [Column] with
 /// [MainAxisSize.min] and [CrossAxisAlignment.center]: one below another, from top to
-/// bottom, centered horizontally. Its intrinsic sizes, dry layout, and semantics are
-/// those of that [RenderFlex], too.
+/// bottom, centered horizontally. Its intrinsic sizes, and dry layout, are those of that
+/// [RenderFlex], too.
 ///
-/// Unlike a [Column], this box only paints the children that can be seen, and only
-/// hit-tests the children around the hit position, so that painting and hit-testing
-/// don't get slower as a document gets longer.
+/// Unlike a [Column], this box only paints the children that can be seen, only reports
+/// the semantics of the children around the viewport, and only hit-tests the children
+/// around the hit position, so that painting, semantics, and hit-testing don't get slower
+/// as a document gets longer.
 ///
 /// ## Layout
 ///
@@ -1994,6 +1995,26 @@ class _DocumentComponentColumn extends Flex {
 ///
 /// When a repaint boundary sits between this box and the nearest viewport, the
 /// viewport can scroll without repainting this box, so this box paints every child.
+///
+/// ## Semantics
+///
+/// This box reports the semantics of the children whose paint rects overlap the nearest
+/// viewport, extended above and below by a viewport's height, or by twice the viewport's
+/// cache extent, if that's more. The viewport keeps the semantics of what's within its
+/// cache extent around it, and drops the rest, so the semantics tree holds the same nodes
+/// as it would if this box reported every child, as a [SliverList] that builds the
+/// children in its cache extent does. A placeholder, of a node that a progressive layout
+/// hasn't built yet, has no semantics.
+///
+/// When the viewport has moved, while it paints this box, so far that its cache extent
+/// reaches past the children that this box last reported, this box asks for a semantics
+/// update, which reports the children around the viewport where it is now, e.g., while
+/// the user scrolls, or an assistive technology scrolls the viewport, or shows a node on
+/// screen.
+///
+/// When this box can't tell where the viewport is, because there's none, or because a
+/// repaint boundary sits between this box and the viewport, which can then scroll without
+/// painting this box, this box reports the semantics of every child.
 ///
 /// ## Hit-testing
 ///
@@ -2077,6 +2098,26 @@ class RenderDocumentComponentColumn extends RenderFlex {
   /// The index of each slot among the children, as of the last time that the children
   /// were listed.
   final Map<_RenderComponentSlot, int> _slotIndices = {};
+
+  /// The top and bottom, in this box's coordinates, of the region whose children this box
+  /// reports the semantics of, which is infinite to report every child, or `null` until the
+  /// next semantics update decides.
+  ///
+  /// It changes only when this box asks for a semantics update, because the framework also
+  /// visits the children for semantics without collecting them again, e.g., to find out
+  /// whether one of them blocks the semantics of its previous siblings, and the children
+  /// that it collects must be the ones that this box last reported.
+  ({double top, double bottom})? _semanticsWindow;
+
+  /// The [_semanticsWindow] that reports the semantics of every child.
+  static const _semanticsWindowOfEveryChild = (top: double.negativeInfinity, bottom: double.infinity);
+
+  @override
+  void attach(PipelineOwner owner) {
+    super.attach(owner);
+    // The viewport may be another one.
+    _semanticsWindow = null;
+  }
 
   /// The child at [index], counting from the top.
   ///
@@ -2309,6 +2350,8 @@ class RenderDocumentComponentColumn extends RenderFlex {
       return;
     }
 
+    _updateSemanticsWindowIfViewportMoved();
+
     final visibleRect = _findVisibleRect(context, offset);
     if (visibleRect == null) {
       // We can't tell what's visible. Paint everything.
@@ -2366,24 +2409,161 @@ class RenderDocumentComponentColumn extends RenderFlex {
     // ...and within the nearest viewport. We use the viewport's bounds, rather than the
     // painting context's estimated bounds, because the estimated bounds aren't shifted
     // by layers that move their children, like an OpacityLayer.
+    final viewport = _findViewport();
+    if (viewport == null) {
+      // A repaint boundary caches our picture, and the viewport can show that picture at
+      // another scroll offset, without painting us again. Paint everything.
+      return null;
+    }
+    final viewportRect = viewport.rect;
+    if (viewportRect != null) {
+      visibleRect = visibleRect.intersect(viewportRect);
+    }
+
+    return visibleRect.inflate(paintCullingMargin);
+  }
+
+  /// Returns the nearest viewport above this box, and its bounds in this box's coordinates,
+  /// both of which are `null` when there's no viewport, or `null` when this box, or a box
+  /// between this box and the viewport, is a repaint boundary, whose picture the viewport
+  /// can show at another scroll offset without painting this box again, or when the bounds
+  /// can't be found.
+  ({RenderBox? viewport, Rect? rect})? _findViewport() {
+    if (isRepaintBoundary) {
+      return null;
+    }
+
     RenderObject? ancestor = parent;
     while (ancestor != null && ancestor is! RenderAbstractViewport) {
       if (ancestor.isRepaintBoundary) {
-        // This repaint boundary caches our picture, and the viewport can show that
-        // picture at another scroll offset, without painting us again. Paint everything.
         return null;
       }
       ancestor = ancestor.parent;
     }
-    if (ancestor is RenderBox && ancestor.hasSize) {
-      final viewportToLocal = Matrix4.tryInvert(getTransformTo(ancestor));
-      if (viewportToLocal == null) {
-        return null;
-      }
-      visibleRect = visibleRect.intersect(MatrixUtils.transformRect(viewportToLocal, Offset.zero & ancestor.size));
+    if (ancestor is! RenderBox || !ancestor.hasSize) {
+      return (viewport: null, rect: null);
     }
 
-    return visibleRect.inflate(paintCullingMargin);
+    final viewportToLocal = Matrix4.tryInvert(getTransformTo(ancestor));
+    if (viewportToLocal == null) {
+      return null;
+    }
+    return (viewport: ancestor, rect: MatrixUtils.transformRect(viewportToLocal, Offset.zero & ancestor.size));
+  }
+
+  /// Reports the semantics of the children around the viewport, or of every child when
+  /// this box can't tell where the viewport is.
+  ///
+  /// See the class documentation.
+  @override
+  void visitChildrenForSemantics(RenderObjectVisitor visitor) {
+    final window = _semanticsWindow ??= _findSemanticsWindow() ?? _semanticsWindowOfEveryChild;
+    if (window == _semanticsWindowOfEveryChild || !_areChildrenStackedTopToBottom || !hasSize) {
+      super.visitChildrenForSemantics(visitor);
+      return;
+    }
+
+    _readPaintRects();
+    final paintRectsOutsideOfLayout = _paintRectsOutsideOfLayout!;
+    final children = _children;
+    // A child whose layout rect ends above `searchTop`, or starts below `searchBottom`,
+    // can't paint in the window.
+    final searchTop = window.top - _maxPaintExtentBelowLayout;
+    final searchBottom = window.bottom + _maxPaintExtentAboveLayout;
+    for (int i = _firstChildEndingAtOrBelow(searchTop); i < children.length; i += 1) {
+      final child = children[i];
+      final childOffset = (child.parentData! as FlexParentData).offset;
+      if (childOffset.dy > searchBottom) {
+        break;
+      }
+      if (_ProgressiveFill._isPlaceholder(child)) {
+        continue;
+      }
+
+      final paintRect = paintRectsOutsideOfLayout[i]?.shift(childOffset) ?? childOffset & child.size;
+      if (paintRect.top <= window.bottom && paintRect.bottom >= window.top) {
+        visitor(child);
+      }
+    }
+  }
+
+  /// Returns the top and bottom, in this box's coordinates, of the region whose children
+  /// this box reports the semantics of: the viewport, extended by [_semanticsMarginOf], or
+  /// `null` to report every child.
+  ({double top, double bottom})? _findSemanticsWindow() {
+    if (!_areChildrenStackedTopToBottom || firstChild == null || !hasSize || _childrenChangedSinceLayout) {
+      return null;
+    }
+    final viewport = _findViewport();
+    final viewportBox = viewport?.viewport;
+    final viewportRect = viewport?.rect;
+    if (viewportBox == null || viewportRect == null) {
+      return null;
+    }
+
+    final margin = _semanticsMarginOf(viewportBox, viewportRect.height);
+    return (top: viewportRect.top - margin, bottom: viewportRect.bottom + margin);
+  }
+
+  /// How far above, and below, the [viewport], which is [viewportExtent] tall in this box's
+  /// coordinates, this box reports the semantics of its children: a viewport's height, or
+  /// twice the viewport's cache extent, if that's more, so that the viewport can move by
+  /// at least half of that before [_updateSemanticsWindowIfViewportMoved] asks for an
+  /// update.
+  static double _semanticsMarginOf(RenderBox viewport, double viewportExtent) {
+    return max(viewportExtent, 2 * _cacheExtentOf(viewport, viewportExtent));
+  }
+
+  /// The cache extent of the [viewport], which is [viewportExtent] tall, within which it
+  /// keeps the semantics of its content around it.
+  static double _cacheExtentOf(RenderBox viewport, double viewportExtent) {
+    if (viewport is! RenderViewportBase) {
+      return RenderAbstractViewport.defaultCacheExtent;
+    }
+    final cacheExtent = viewport.scrollCacheExtent;
+    return switch (cacheExtent.style) {
+      CacheExtentStyle.pixel => cacheExtent.value,
+      CacheExtentStyle.viewport => cacheExtent.value * viewportExtent,
+    };
+  }
+
+  /// Moves the [_semanticsWindow] around the viewport, and asks for a semantics update,
+  /// when the viewport has moved so far, since the window was last moved, that its cache
+  /// extent reaches past the window, or when this box can no longer tell, or can now tell,
+  /// where the viewport is.
+  ///
+  /// It runs while this box paints, which it does whenever the viewport moves, unless a
+  /// repaint boundary sits between them, in which case this box reports every child. A
+  /// semantics update doesn't visit this box's children again only because the viewport
+  /// moved.
+  void _updateSemanticsWindowIfViewportMoved() {
+    final window = _semanticsWindow;
+    if (owner?.semanticsOwner == null) {
+      // There are no semantics. The next semantics update decides where the window is.
+      _semanticsWindow = null;
+      return;
+    }
+    if (window == null) {
+      // The next semantics update decides where the window is.
+      return;
+    }
+
+    final newWindow = _findSemanticsWindow() ?? _semanticsWindowOfEveryChild;
+    if (newWindow == _semanticsWindowOfEveryChild || window == _semanticsWindowOfEveryChild) {
+      if (newWindow != window) {
+        _semanticsWindow = newWindow;
+        markNeedsSemanticsUpdate();
+      }
+      return;
+    }
+
+    final viewport = _findViewport()!;
+    final viewportRect = viewport.rect!;
+    final cacheExtent = _cacheExtentOf(viewport.viewport!, viewportRect.height);
+    if (viewportRect.top - cacheExtent < window.top || viewportRect.bottom + cacheExtent > window.bottom) {
+      _semanticsWindow = newWindow;
+      markNeedsSemanticsUpdate();
+    }
   }
 
   /// Reads the paint rect of every child, and the farthest that any child paints outside
