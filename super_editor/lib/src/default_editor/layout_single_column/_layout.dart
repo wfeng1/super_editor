@@ -1164,15 +1164,18 @@ class _SingleColumnDocumentLayoutState extends State<SingleColumnDocumentLayout>
     final windowBottom = initialScrollOffset + screenHeight * config._windowExtentBelowOffset;
     final measuredHeights = config.controller?._measuredHeights ?? const <String, double>{};
 
-    final built = <String>{};
+    // Estimate the nodes from the top down to the bottom of the window, but no further,
+    // because the nodes below the window are deferred, except for the last one.
+    final built = <String>{
+      componentViewModels.first.nodeId,
+      componentViewModels.last.nodeId,
+    };
     var componentTop = padding.resolve(TextDirection.ltr).top;
-    for (int i = 0; i < componentViewModels.length; i += 1) {
+    for (int i = 0; i < componentViewModels.length && componentTop < windowBottom; i += 1) {
       final componentViewModel = componentViewModels[i];
       final componentBottom = componentTop +
           _ProgressiveFill._estimateChildHeight(config, measuredHeights, componentViewModel, columnWidth);
-      if (i == 0 ||
-          i == componentViewModels.length - 1 ||
-          (componentBottom > windowTop && componentTop < windowBottom)) {
+      if (componentBottom > windowTop) {
         built.add(componentViewModel.nodeId);
       }
       componentTop = componentBottom;
