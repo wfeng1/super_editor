@@ -2,7 +2,6 @@ import 'package:flutter/rendering.dart';
 import 'package:flutter/widgets.dart';
 import 'package:super_editor/src/infrastructure/_logging.dart';
 import 'package:super_editor/src/infrastructure/content_layers.dart';
-import 'package:super_editor/src/infrastructure/sliver_hybrid_stack.dart';
 
 /// A [ContentLayers] widget that's implemented to work with Slivers.
 class SliverContentLayers extends ContentLayers {
@@ -44,6 +43,13 @@ class RenderSliverContentLayers extends RenderSliver with RenderSliverHelpers im
   /// Whether we are at the middle of a [performLayout] call.
   bool _runningLayout = false;
 
+  /// The size that the layers were last built for and laid out at, or `null`
+  /// if the layers haven't been built yet.
+  ///
+  /// The layers are rebuilt when this size changes, e.g., when the cross-axis
+  /// extent changes, or when the content's scroll extent changes.
+  Size? _layerSize;
+
   @override
   void attach(PipelineOwner owner) {
     contentLayersLog.info("Attaching RenderSliverContentLayers to owner: $owner");
@@ -67,6 +73,27 @@ class RenderSliverContentLayers extends RenderSliver with RenderSliverHelpers im
     });
   }
 
+  /// Marks this render object as needing layout, and, when called from
+  /// outside of this render object's own layout, requests that the underlays
+  /// and overlays are rebuilt during that next layout.
+  ///
+  /// The layers are rebuilt, during layout, only when one of these holds:
+  ///
+  ///  * [markNeedsLayout] was called since the last layout, either because the
+  ///    content changed its layout, or because someone outside called it;
+  ///  * the cross-axis extent changed;
+  ///  * the content's scroll extent changed;
+  ///  * this is the first layout.
+  ///
+  /// A layout that only scrolls, which changes the scroll offset or the
+  /// remaining paint extent, doesn't rebuild the layers.
+  ///
+  /// A layer that depends on something other than the content's layout, such
+  /// as a document change that doesn't change the content's layout, can call
+  /// [markNeedsLayout] on its ancestor [RenderSliverContentLayers] instead of
+  /// `setState()`. All layers are then rebuilt exactly once, during the next
+  /// layout, after the content is laid out, so they can query a fresh content
+  /// layout. [requestLayerRebuild] does the same, under a clearer name.
   @override
   void markNeedsLayout() {
     super.markNeedsLayout();
@@ -81,6 +108,12 @@ class RenderSliverContentLayers extends RenderSliver with RenderSliverHelpers im
     }
     _contentNeedsLayout = true;
   }
+
+  /// Rebuilds every underlay and overlay during the next layout, after the
+  /// content is laid out.
+  ///
+  /// This is the same as calling [markNeedsLayout] from outside of layout.
+  void requestLayerRebuild() => markNeedsLayout();
 
   @override
   List<DiagnosticsNode> debugDescribeChildren() {
@@ -174,8 +207,19 @@ class RenderSliverContentLayers extends RenderSliver with RenderSliverHelpers im
       return;
     }
 
-    _runningLayout = true;
+    // Whether someone asked for the layers to rebuild, e.g., the content, whose
+    // layout changed, or an external call to markNeedsLayout().
+    final isLayerRebuildRequested = _contentNeedsLayout;
 
+    _runningLayout = true;
+    try {
+      _layoutContentAndLayers(isLayerRebuildRequested: isLayerRebuildRequested);
+    } finally {
+      _runningLayout = false;
+    }
+  }
+
+  void _layoutContentAndLayers({required bool isLayerRebuildRequested}) {
     // Always layout the content first, so that layers can inspect the content layout.
     contentLayersLog.fine("Laying out content - $_content");
     (_content!.parentData! as SliverLogicalParentData).layoutOffset = 0.0;
@@ -185,6 +229,9 @@ class RenderSliverContentLayers extends RenderSliver with RenderSliverHelpers im
     // The size of the layers, and the our size, is exactly the same as the content.
     final SliverGeometry sliverLayoutGeometry = _content!.geometry!;
     if (sliverLayoutGeometry.scrollOffsetCorrection != null) {
+      // The viewport will lay us out again with a corrected scroll offset. Leave
+      // _contentNeedsLayout as it is, so that a requested layer rebuild still
+      // happens in that next layout.
       geometry = SliverGeometry(
         scrollOffsetCorrection: sliverLayoutGeometry.scrollOffsetCorrection,
       );
@@ -201,30 +248,38 @@ class RenderSliverContentLayers extends RenderSliver with RenderSliverHelpers im
 
     _contentNeedsLayout = false;
 
+    // The layers cover the content's whole scroll extent, at the full cross-axis
+    // extent. Neither changes when the user scrolls.
+    final layerSize = Size(constraints.crossAxisExtent, sliverLayoutGeometry.scrollExtent);
+
     // Build the underlay and overlays during the layout phase so that they can inspect an
     // up-to-date content layout.
     //
     // This behavior is what allows us to avoid layers that are always one frame behind the
     // content changes.
-    contentLayersLog.fine("Building layers");
-    invokeLayoutCallback((constraints) {
-      // Usually, widgets are built during the build phase, but we're building the layers
-      // during layout phase, so we need to explicitly tell Flutter to build all elements.
-      _element!.owner!.buildScope(_element!, () {
-        _element!.buildLayers();
+    //
+    // Only rebuild the layers when the content layout might have changed, or someone asked
+    // for it. Scrolling changes our constraints on every frame, but it doesn't change the
+    // content layout, so a layout that only scrolls doesn't rebuild the layers.
+    if (isLayerRebuildRequested || layerSize != _layerSize) {
+      contentLayersLog.fine("Building layers");
+      invokeLayoutCallback((constraints) {
+        // Usually, widgets are built during the build phase, but we're building the layers
+        // during layout phase, so we need to explicitly tell Flutter to build all elements.
+        _element!.owner!.buildScope(_element!, () {
+          _element!.buildLayers();
+        });
       });
-    });
-    contentLayersLog.finer("Done building layers");
+      contentLayersLog.finer("Done building layers");
+    }
+    _layerSize = layerSize;
 
     contentLayersLog.fine("Laying out layers (${_underlays.length} underlays, ${_overlays.length} overlays)");
     // Layout the layers below and above the content.
-    final layerConstraints = ScrollingBoxConstraints(
-      minWidth: constraints.crossAxisExtent,
-      maxWidth: constraints.crossAxisExtent,
-      minHeight: sliverLayoutGeometry.scrollExtent,
-      maxHeight: sliverLayoutGeometry.scrollExtent,
-      scrollOffset: constraints.scrollOffset,
-    );
+    //
+    // The layer constraints don't include the scroll offset, so that a scroll doesn't
+    // re-layout the layers. The layers are moved with the content by their layout offset.
+    final layerConstraints = BoxConstraints.tight(layerSize);
 
     for (final underlay in _underlays) {
       final childParentData = underlay.parentData! as SliverLogicalParentData;
@@ -239,7 +294,6 @@ class RenderSliverContentLayers extends RenderSliver with RenderSliverHelpers im
       overlay.layout(layerConstraints);
     }
 
-    _runningLayout = false;
     contentLayersLog.finer("Done laying out layers");
   }
 

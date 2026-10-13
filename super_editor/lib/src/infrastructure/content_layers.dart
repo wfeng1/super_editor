@@ -241,6 +241,12 @@ class ContentLayersElement extends RenderObjectElement {
 // This is intentionally static to prevent closure allocation during
   // the traversal of the element tree.
   static void _isSubtreeDirtyVisitor(Element element) {
+    if (_isDirty) {
+      // We already found a dirty element. Stop looking. Flutter still calls this
+      // visitor for the remaining siblings, but we no longer descend into them.
+      return;
+    }
+
     // Can't use the () => message syntax because it allocates a closure.
     assert(() {
       if (contentLayersLog.isLoggable(Level.FINEST)) {
