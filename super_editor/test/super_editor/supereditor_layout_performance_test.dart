@@ -9,6 +9,8 @@ import 'package:super_editor/super_editor_test.dart';
 void main() {
   group("SingleColumnDocumentLayout", () {
     group("rebuilds", () {
+      _pinEagerLayout();
+
       testWidgets("listens to its presenter once, and rebuilds only the component that changed", (tester) async {
         final document = _createParagraphs(30);
         final composer = MutableDocumentComposer();
@@ -178,6 +180,8 @@ void main() {
     });
 
     group("paints", () {
+      _pinEagerLayout();
+
       testWidgets("the components that scroll into view, and not the ones far away", (tester) async {
         final scrollController = ScrollController();
         addTearDown(scrollController.dispose);
@@ -322,6 +326,8 @@ void main() {
     });
 
     group("finds the component at an offset", () {
+      _pinEagerLayout();
+
       testWidgets("as a linear scan does, when components sit side by side", (tester) async {
         final document = _createParagraphs(40);
         // Paint the components in pairs, side by side, the way an app's columns might,
@@ -651,4 +657,18 @@ class _EmptyLayerBuilder implements SuperEditorLayerBuilder {
   ContentLayerWidget build(BuildContext context, SuperEditorContext editorContext) {
     return const ContentLayerProxyWidget(child: SizedBox());
   }
+}
+
+/// Makes the tests in the enclosing group build every component in the first frame, even
+/// when the suite runs with progressive layout on by default, because they check how the
+/// eager layout builds, paints, and finds every component.
+void _pinEagerLayout() {
+  late bool wasProgressiveByDefault;
+  setUp(() {
+    wasProgressiveByDefault = SingleColumnProgressiveLayout.debugProgressiveByDefault;
+    SingleColumnProgressiveLayout.debugProgressiveByDefault = false;
+  });
+  tearDown(() {
+    SingleColumnProgressiveLayout.debugProgressiveByDefault = wasProgressiveByDefault;
+  });
 }
