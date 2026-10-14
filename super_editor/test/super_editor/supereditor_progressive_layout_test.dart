@@ -680,6 +680,22 @@ void main() {
           expect(progressiveRects[nodeId], _rectMoreOrLessEquals(eagerRects[nodeId]!), reason: "Node $nodeId");
         }
       });
+
+      testWidgets("forgets the estimated heights of a placeholder once its node is built", (tester) async {
+        final harness = await _pumpEditor(tester, document: _createDocument());
+
+        // The placeholders estimate their heights to lay out.
+        const placeholderIndex = 200;
+        expect(harness.progressiveLayout.isComponentDeferred("$placeholderIndex"), isTrue);
+        expect(_estimatedHeightsOf(harness.column.childAt(placeholderIndex)), greaterThan(0));
+
+        await harness.pumpUntilComplete(tester);
+
+        // Every slot holds its component, and none keeps its estimates.
+        for (int index = 0; index < harness.column.childCount; index += 1) {
+          expect(_estimatedHeightsOf(harness.column.childAt(index)), 0, reason: "Child $index");
+        }
+      });
     });
 
     group("builds nodes together >", () {
@@ -1264,6 +1280,12 @@ MutableDocument _createDocument({int paragraphCount = 400}) {
         ),
     ],
   );
+}
+
+/// The number of estimated heights that the slot [child] of the column of components keeps.
+int _estimatedHeightsOf(RenderBox child) {
+  final property = child.toDiagnosticsNode().getProperties().firstWhere((p) => p.name == "estimatedHeights");
+  return property.value! as int;
 }
 
 Future<_Harness> _pumpEditor(

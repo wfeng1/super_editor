@@ -35,6 +35,7 @@ import 'package:super_editor/src/infrastructure/sliver_hybrid_stack.dart';
 import 'package:super_editor/src/infrastructure/toolbar_position_delegate.dart';
 import 'package:super_editor/src/infrastructure/touch_controls.dart';
 import 'package:super_editor/src/super_textfield/metrics.dart';
+import 'package:super_editor/src/infrastructure/flutter/releasable_overlay_builder.dart';
 import 'package:super_text_layout/super_text_layout.dart';
 
 import '../default_editor/text_tools.dart';
@@ -135,6 +136,7 @@ class _ReadOnlyAndroidDocumentTouchInteractorState extends State<ReadOnlyAndroid
   // magnifier, and toolbar.
   final _overlayPortalController =
       GroupedOverlayPortalController(displayPriority: OverlayGroupPriority.editingControls);
+  late final _overlayChild = ReleasableOverlayBuilder(_buildControlsOverlay);
   final _overlayPortalRebuildSignal = SignalNotifier();
   late AndroidDocumentGestureEditingController _editingController;
   final _magnifierFocalPointLink = LeaderLink();
@@ -284,6 +286,9 @@ class _ReadOnlyAndroidDocumentTouchInteractorState extends State<ReadOnlyAndroid
     widget.focusNode.removeListener(_onFocusChange);
 
     _handleAutoScrolling.dispose();
+
+    _overlayPortalController.dispose();
+    _overlayChild.release();
 
     super.dispose();
   }
@@ -1059,8 +1064,10 @@ class _ReadOnlyAndroidDocumentTouchInteractorState extends State<ReadOnlyAndroid
         // Layer above
         OverlayPortal(
           controller: _overlayPortalController,
-          overlayChildBuilder: _buildControlsOverlay,
-          child: RawGestureDetector(
+          overlayChildBuilder: _overlayChild.build,
+          // The portal keeps its child once it's disposed, and the child's gesture
+          // callbacks reach this State.
+          child: _overlayChild.child(RawGestureDetector(
             key: _interactor,
             behavior: HitTestBehavior.translucent,
             gestures: <Type, GestureRecognizerFactory>{
@@ -1083,7 +1090,7 @@ class _ReadOnlyAndroidDocumentTouchInteractorState extends State<ReadOnlyAndroid
                 },
               ),
             },
-          ),
+          )),
         ),
       ],
     );

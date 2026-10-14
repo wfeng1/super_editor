@@ -1448,6 +1448,16 @@ class _RenderComponentSlot extends RenderProxyBox {
   /// component's estimated size.
   bool get isPlaceholder => child == null;
 
+  @override
+  set child(RenderBox? child) {
+    super.child = child;
+    if (child != null) {
+      // The estimates aren't used while the slot holds its component, and a slot holds
+      // its component from when its node is built for as long as the layout lives.
+      _estimatedHeights.clear();
+    }
+  }
+
   String get nodeId => _nodeId;
   String _nodeId;
   set nodeId(String nodeId) {
@@ -1545,6 +1555,7 @@ class _RenderComponentSlot extends RenderProxyBox {
     super.debugFillProperties(properties);
     properties.add(StringProperty("nodeId", _nodeId));
     properties.add(FlagProperty("isPlaceholder", value: isPlaceholder, ifTrue: "placeholder"));
+    properties.add(IntProperty("estimatedHeights", _estimatedHeights.length));
   }
 }
 

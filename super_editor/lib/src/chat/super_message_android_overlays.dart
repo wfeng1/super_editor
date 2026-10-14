@@ -29,6 +29,7 @@ import 'package:super_editor/src/infrastructure/platforms/mobile_documents.dart'
 import 'package:super_editor/src/infrastructure/document_context.dart';
 import 'package:super_editor/src/infrastructure/render_sliver_ext.dart';
 import 'package:super_editor/src/infrastructure/touch_controls.dart';
+import 'package:super_editor/src/infrastructure/flutter/releasable_overlay_builder.dart';
 
 /// Adds and removes an Android-style editor controls overlay, as dictated by an ancestor
 /// [SuperMessageAndroidControlsScope].
@@ -65,6 +66,7 @@ class SuperMessageAndroidControlsOverlayManager extends StatefulWidget {
 class SuperMessageAndroidControlsOverlayManagerState extends State<SuperMessageAndroidControlsOverlayManager> {
   final _boundsKey = GlobalKey();
   final _overlayController = OverlayPortalController();
+  late final _overlayChild = ReleasableOverlayBuilder(_buildOverlay);
 
   SuperMessageAndroidControlsController? _controlsController;
   late FollowerAligner _toolbarAligner;
@@ -136,6 +138,7 @@ class SuperMessageAndroidControlsOverlayManagerState extends State<SuperMessageA
   @override
   void dispose() {
     widget.editor.composer.selectionNotifier.removeListener(_onSelectionChange);
+    _overlayChild.release();
     super.dispose();
   }
 
@@ -289,8 +292,10 @@ class SuperMessageAndroidControlsOverlayManagerState extends State<SuperMessageA
   Widget build(BuildContext context) {
     return OverlayPortal(
       controller: _overlayController,
-      overlayChildBuilder: _buildOverlay,
-      child: widget.child,
+      overlayChildBuilder: _overlayChild.build,
+      // The portal keeps its child once it's disposed, and the child is the message's
+      // whole document.
+      child: widget.child != null ? _overlayChild.child(widget.child!) : null,
     );
   }
 

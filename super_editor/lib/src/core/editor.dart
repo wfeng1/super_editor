@@ -64,6 +64,12 @@ class Editor implements RequestDispatcher {
         _changeListeners = listeners ?? [] {
     context = EditContext(editables);
     _commandExecutor = _DocumentEditorCommandExecutor(context);
+
+    for (final editable in editables.values) {
+      if (editable is MutableDocument) {
+        editable._onEditorCreated(isHistoryEnabled: isHistoryEnabled);
+      }
+    }
   }
 
   void dispose() {
@@ -1119,8 +1125,34 @@ class MutableDocument with Iterable<DocumentNode> implements Document, Editable 
     _listeners.clear();
   }
 
-  late final List<DocumentNode> _latestNodesSnapshot;
+  /// The nodes that [reset] restores, which an [Editor] with history replays its history
+  /// on top of to undo, or `null` when only [Editor]s without history edit this document.
+  ///
+  /// It keeps every node that an edit since replaced alive, up to a full copy of the
+  /// document, so it's dropped when an [Editor] without history is created for this
+  /// document, which never resets it.
+  List<DocumentNode>? _latestNodesSnapshot;
+
+  /// Whether an [Editor] with history was created for this document, which resets it
+  /// to undo.
+  bool _isEditedWithHistory = false;
+
   bool _didReset = false;
+
+  /// Keeps the nodes that [reset] restores while an [Editor] with history edits this
+  /// document, and lets go of them when only [Editor]s without history do.
+  void _onEditorCreated({required bool isHistoryEnabled}) {
+    if (isHistoryEnabled) {
+      _isEditedWithHistory = true;
+      // The history starts now, when an Editor without history dropped the nodes.
+      _latestNodesSnapshot ??= List.from(_nodes);
+      return;
+    }
+
+    if (!_isEditedWithHistory) {
+      _latestNodesSnapshot = null;
+    }
+  }
 
   final List<DocumentNode> _nodes;
 
@@ -1440,9 +1472,15 @@ class MutableDocument with Iterable<DocumentNode> implements Document, Editable 
 
   @override
   void reset() {
+    final snapshot = _latestNodesSnapshot;
+    if (snapshot == null) {
+      throw StateError(
+          "This document can't be reset: only Editors without history edit it, so it doesn't keep the nodes it started with.");
+    }
+
     _nodes
       ..clear()
-      ..addAll(_latestNodesSnapshot);
+      ..addAll(snapshot);
     _refreshNodeIdCaches();
 
     _didReset = true;

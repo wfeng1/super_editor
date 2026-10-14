@@ -71,6 +71,8 @@ dev_dependencies:
   flutter_test_goldens: ^0.0.11
   golden_bricks: ^1.0.0
   golden_runner: ^0.2.0
+  # forceGC() for the memory tests. flutter_test already depends on it and pins its version.
+  leak_tracker: any
 
 flutter:
   # no Flutter configuration

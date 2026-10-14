@@ -313,6 +313,14 @@ class SuperReaderState extends State<SuperReader> {
   void dispose() {
     _contentTapDelegate?.dispose();
 
+    // The presenter listens to the document, and its selection styler listens to the
+    // composer, which can outlive this reader. Disposing it stops them from keeping the
+    // presenter, and every view model it caches, alive.
+    _docLayoutPresenter?.dispose();
+    _docLayoutPresenter = null;
+
+    _autoScrollController.dispose();
+
     _focusNode.removeListener(_onFocusChange);
     if (widget.focusNode == null) {
       // We are using our own private FocusNode. Dispose it.
@@ -363,6 +371,12 @@ class SuperReaderState extends State<SuperReader> {
         // to minimize view model recalculations.
         _docLayoutSelectionStyler,
       ],
+      // The presenter disposes the stylers made for it, above. The underline styler
+      // outlives it, and the app's phases aren't this reader's to dispose.
+      sharedPhases: {
+        _customUnderlineStyler,
+        ...widget.customStylePhases,
+      },
     );
 
     _recomputeIfLayoutShouldShowCaret();

@@ -603,6 +603,14 @@ class SuperEditorState extends State<SuperEditor> {
     _iosControlsController.dispose();
     _androidControlsController.dispose();
 
+    // The presenter listens to the document, and its selection and composing region
+    // stylers listen to the composer, which can outlive this editor. Disposing it stops
+    // them from keeping the presenter, and every view model it caches, alive.
+    _docLayoutPresenter?.dispose();
+    _docLayoutPresenter = null;
+
+    _autoScrollController.dispose();
+
     widget.editor.context.remove(Editor.layoutKey, _documentLayoutEditable);
 
     _focusNode.removeListener(_onFocusChange);
@@ -674,6 +682,11 @@ class SuperEditorState extends State<SuperEditor> {
         defaultTargetPlatform == TargetPlatform.iOS ||
         defaultTargetPlatform == TargetPlatform.android;
 
+    final pluginStylePhases = [
+      for (final plugin in widget.plugins) //
+        ...plugin.appendedStylePhases,
+    ];
+
     _docLayoutPresenter = SingleColumnLayoutPresenter(
       document: document,
       componentBuilders: widget.componentBuilders,
@@ -692,9 +705,15 @@ class SuperEditorState extends State<SuperEditor> {
         // just before the phases that the app wants to be at the end
         // to minimize view model recalculations.
         _docLayoutSelectionStyler,
-        for (final plugin in widget.plugins) //
-          ...plugin.appendedStylePhases,
+        ...pluginStylePhases,
       ],
+      // The presenter disposes the stylers made for it, above. The underline styler
+      // outlives it, and the app's and plugins' phases aren't this editor's to dispose.
+      sharedPhases: {
+        _customUnderlineStyler,
+        ...widget.customStylePhases,
+        ...pluginStylePhases,
+      },
     );
 
     _recomputeIfLayoutShouldShowCaret();

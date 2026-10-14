@@ -33,6 +33,7 @@ import 'package:super_editor/src/infrastructure/platforms/mobile_documents.dart'
 import 'package:super_editor/src/infrastructure/signal_notifier.dart';
 import 'package:super_editor/src/infrastructure/sliver_hybrid_stack.dart';
 import 'package:super_editor/src/infrastructure/touch_controls.dart';
+import 'package:super_editor/src/infrastructure/flutter/releasable_overlay_builder.dart';
 import 'package:super_keyboard/super_keyboard.dart';
 
 import '../infrastructure/document_gestures.dart';
@@ -1415,6 +1416,7 @@ class SuperEditorAndroidControlsOverlayManager extends StatefulWidget {
 class SuperEditorAndroidControlsOverlayManagerState extends State<SuperEditorAndroidControlsOverlayManager> {
   final _boundsKey = GlobalKey();
   final _overlayController = OverlayPortalController();
+  late final _overlayChild = ReleasableOverlayBuilder(_buildOverlay);
 
   SuperEditorAndroidControlsController? _controlsController;
   late FollowerAligner _toolbarAligner;
@@ -1514,6 +1516,8 @@ class SuperEditorAndroidControlsOverlayManagerState extends State<SuperEditorAnd
     widget.dragHandleAutoScroller.value?.stopAutoScrollHandleMonitoring();
     widget.scrollChangeSignal.removeListener(_onDocumentScroll);
     widget.selection.removeListener(_onSelectionChange);
+
+    _overlayChild.release();
 
     super.dispose();
   }
@@ -1781,7 +1785,7 @@ class SuperEditorAndroidControlsOverlayManagerState extends State<SuperEditorAnd
         widget.child!,
         OverlayPortal(
           controller: _overlayController,
-          overlayChildBuilder: _buildOverlay,
+          overlayChildBuilder: _overlayChild.build,
           child: const SizedBox(),
         ),
       ],

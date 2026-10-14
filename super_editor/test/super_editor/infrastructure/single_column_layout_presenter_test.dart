@@ -123,6 +123,94 @@ void main() {
       pipeline.expectStyledAsFromScratch();
     });
   });
+
+  group("SingleColumnLayoutPresenter > disposal >", () {
+    test("stops listening to the document, and disposes the phases that it owns", () {
+      final document = _ListenerCountingDocument(nodes: _paragraphs(3));
+      final documentListenersWithoutPresenter = document.listenerCount;
+      final ownPhase = _RecordingStylePhase();
+      final sharedPhase = _RecordingStylePhase();
+
+      final presenter = SingleColumnLayoutPresenter(
+        document: document,
+        componentBuilders: defaultComponentBuilders,
+        pipeline: [ownPhase, sharedPhase],
+        sharedPhases: {sharedPhase},
+      );
+      expect(document.listenerCount, documentListenersWithoutPresenter + 1);
+
+      presenter.dispose();
+
+      expect(document.listenerCount, documentListenersWithoutPresenter);
+      expect(ownPhase.isDisposed, isTrue);
+      expect(sharedPhase.isDisposed, isFalse);
+    });
+
+    test("leaves a shared phase to the presenter that took it over", () {
+      final document = MutableDocument(nodes: _paragraphs(3));
+      final sharedPhase = _RecordingStylePhase();
+      final first = SingleColumnLayoutPresenter(
+        document: document,
+        componentBuilders: defaultComponentBuilders,
+        pipeline: [sharedPhase],
+        sharedPhases: {sharedPhase},
+      );
+      final second = SingleColumnLayoutPresenter(
+        document: document,
+        componentBuilders: defaultComponentBuilders,
+        pipeline: [sharedPhase],
+        sharedPhases: {sharedPhase},
+      )..updateViewModel();
+      expect(second.isDirty, isFalse);
+
+      first.dispose();
+
+      // The phase still marks the presenter that uses it dirty.
+      sharedPhase.restyle();
+      expect(second.isDirty, isTrue);
+
+      // Once that presenter is disposed too, the phase marks nothing dirty.
+      second.dispose();
+      sharedPhase.restyle();
+      expect(second.isDirty, isFalse);
+    });
+  });
+}
+
+/// A [MutableDocument] that counts its listeners.
+class _ListenerCountingDocument extends MutableDocument {
+  _ListenerCountingDocument({super.nodes});
+
+  int listenerCount = 0;
+
+  @override
+  void addListener(DocumentChangeListener listener) {
+    listenerCount += 1;
+    super.addListener(listener);
+  }
+
+  @override
+  void removeListener(DocumentChangeListener listener) {
+    listenerCount -= 1;
+    super.removeListener(listener);
+  }
+}
+
+/// A style phase that changes nothing, and records whether it's disposed.
+class _RecordingStylePhase extends SingleColumnLayoutStylePhase {
+  bool isDisposed = false;
+
+  /// Marks this phase dirty, as a phase whose styles change does.
+  void restyle() => markDirty();
+
+  @override
+  SingleColumnLayoutViewModel style(Document document, SingleColumnLayoutViewModel viewModel) => viewModel;
+
+  @override
+  void dispose() {
+    isDisposed = true;
+    super.dispose();
+  }
 }
 
 List<DocumentNode> _paragraphs(int count) => [
