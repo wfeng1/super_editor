@@ -98,6 +98,20 @@ void main() {
       pipeline.expectStyledAsFromScratch();
     });
 
+    test("keeps the components of the paragraphs that a starting composition isn't in", () {
+      final pipeline = _Pipeline(_paragraphs(5));
+      final before = pipeline.components;
+
+      pipeline.composeIn("3");
+
+      final after = pipeline.components;
+      for (final id in ["1", "2", "4", "5"]) {
+        expect(after[id], same(before[id]), reason: "paragraph $id isn't composed in");
+      }
+      expect((after["3"] as TextComponentViewModel).composingRegion, const TextRange(start: 0, end: 4));
+      pipeline.expectStyledAsFromScratch();
+    });
+
     test("restyles every component when the stylesheet changes", () {
       final pipeline = _Pipeline(_paragraphs(3));
       pipeline.components;

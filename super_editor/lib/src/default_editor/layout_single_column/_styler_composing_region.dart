@@ -60,16 +60,18 @@ class SingleColumnLayoutComposingRegionStyler extends SingleColumnLayoutStylePha
     }
     _styledComposingRegion = documentComposingRegion;
 
+    final composingNodeIds = {for (final node in nodesWithComposingRegion) node.id};
     return restyleOnly(
       viewModel,
       nodeIds: {
         ...changedNodeIds,
         for (final node in nodesWithPreviousComposingRegion) node.id,
-        for (final node in nodesWithComposingRegion) node.id,
+        ...composingNodeIds,
       },
       previousOutput: previousOutput,
-      styleComponent: (component) =>
-          _applyComposingRegion(component.copy(), documentComposingRegion, nodesWithComposingRegion),
+      styleComponent: (component) => composingNodeIds.contains(component.nodeId)
+          ? _applyComposingRegion(component.copy(), documentComposingRegion, nodesWithComposingRegion)
+          : component,
     );
   }
 
@@ -94,11 +96,18 @@ class SingleColumnLayoutComposingRegionStyler extends SingleColumnLayoutStylePha
     );
     _styledComposingRegion = documentComposingRegion;
 
+    // Only the components the composing region is in change: every other one
+    // keeps the view model it came with, so that its component isn't rebuilt.
+    // Copying all of them made every component of the document rebuild each time
+    // a composition started, which on Android is at nearly every word.
+    final composingNodeIds = {for (final node in nodesWithComposingRegion) node.id};
     return SingleColumnLayoutViewModel(
       padding: viewModel.padding,
       componentViewModels: [
         for (final previousViewModel in viewModel.componentViewModels) //
-          _applyComposingRegion(previousViewModel.copy(), documentComposingRegion, nodesWithComposingRegion),
+          composingNodeIds.contains(previousViewModel.nodeId)
+              ? _applyComposingRegion(previousViewModel.copy(), documentComposingRegion, nodesWithComposingRegion)
+              : previousViewModel,
       ],
     );
   }
