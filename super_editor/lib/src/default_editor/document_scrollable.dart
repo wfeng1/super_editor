@@ -347,6 +347,12 @@ class AutoScrollController with ChangeNotifier {
   ViewportResolver? _getViewport;
   ScrollPositionResolver? _getScrollPosition;
 
+  /// The scroll position that this controller listens to, while it's attached.
+  ///
+  /// An ancestor `Scrollable`'s position can outlive the editor, so it's kept to
+  /// stop listening to it on [detachScrollable].
+  ScrollPosition? _listenedScrollPosition;
+
   bool _isAutoScrollingEnabled = false;
   double? _autoScrollingStartOffset;
   Rect? _autoScrollGlobalRegion;
@@ -378,7 +384,7 @@ class AutoScrollController with ChangeNotifier {
     _getScrollPosition = scrollPositionResolver;
 
     // TODO: what if the scroll position changes? We'll be listening the old one...
-    scrollPositionResolver().addListener(_onScrollPositionChange);
+    _listenedScrollPosition = scrollPositionResolver()..addListener(_onScrollPositionChange);
   }
 
   void _onScrollPositionChange() {
@@ -401,10 +407,18 @@ class AutoScrollController with ChangeNotifier {
       return;
     }
 
+    // Stop listening to the scroll position, which otherwise keeps this controller, and
+    // whatever listens to it, alive as long as the position lives.
+    _listenedScrollPosition?.removeListener(_onScrollPositionChange);
+    _listenedScrollPosition = null;
+
     if (_ticker!.isActive) {
       _ticker!.stop();
     }
     _ticker!.dispose();
+    // Don't keep the disposed ticker, which a TickerProviderStateMixin's ticker reaches
+    // the State that created it from.
+    _ticker = null;
     _getViewport = null;
     _getScrollPosition = null;
   }
@@ -571,8 +585,8 @@ class AutoScrollController with ChangeNotifier {
     if (!hasScrollable) {
       // This shouldn't happen. The Ticker should have been stopped whenever
       // the scrollable was detached.
-      _ticker!
-        ..stop()
+      _ticker
+        ?..stop()
         ..dispose();
       return;
     }

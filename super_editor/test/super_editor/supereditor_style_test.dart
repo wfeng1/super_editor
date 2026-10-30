@@ -147,6 +147,48 @@ A paragraph
       );
     });
 
+    group("when only the stylesheet changes >", () {
+      testWidgets("updates the document padding without building every text component again", (tester) async {
+        final builds = <String, int>{};
+        final stylesheet = ValueNotifier(defaultStylesheet.copyWith(documentPadding: const EdgeInsets.all(16)));
+        addTearDown(stylesheet.dispose);
+        await _pumpEditorWithStylesheet(tester, stylesheet: stylesheet, builds: builds);
+        final builtBefore = {...builds};
+        expect(builtBefore, isNotEmpty);
+        final topBefore = SuperEditorInspector.findComponentOffset("0", Alignment.topLeft).dy;
+
+        stylesheet.value = stylesheet.value.copyWith(documentPadding: const EdgeInsets.all(40));
+        await tester.pump();
+
+        // The padding moved the components down...
+        expect(SuperEditorInspector.findComponentOffset("0", Alignment.topLeft).dy, moreOrLessEquals(topBefore + 24));
+        // ...without building any of them again.
+        for (final entry in builtBefore.entries) {
+          expect(builds[entry.key], entry.value, reason: "Node ${entry.key} was built again");
+        }
+      });
+
+      testWidgets("builds the components whose text style changed again, and only those", (tester) async {
+        final builds = <String, int>{};
+        final stylesheet = ValueNotifier(defaultStylesheet.copyWith(addRulesAfter: [_header1Color(Colors.red)]));
+        addTearDown(stylesheet.dispose);
+        await _pumpEditorWithStylesheet(tester, stylesheet: stylesheet, builds: builds);
+        final builtBefore = {...builds};
+        expect(SuperEditorInspector.findParagraphStyle("0")!.color, Colors.red);
+
+        stylesheet.value = defaultStylesheet.copyWith(addRulesAfter: [_header1Color(Colors.green)]);
+        await tester.pump();
+
+        // The header has the new style...
+        expect(SuperEditorInspector.findParagraphStyle("0")!.color, Colors.green);
+        expect(builds["0"], builtBefore["0"]! + 1);
+        // ...and the paragraphs, whose styles didn't change, weren't built again.
+        for (final entry in builtBefore.entries.where((entry) => entry.key != "0")) {
+          expect(builds[entry.key], entry.value, reason: "Node ${entry.key} was built again");
+        }
+      });
+    });
+
     testWidgetsOnArbitraryDesktop('rebuilds only changed nodes', (tester) async {
       int componentChangedCount = 0;
 
@@ -241,6 +283,78 @@ A paragraph
       );
     });
   });
+}
+
+/// Pumps a [SuperEditor] with the [stylesheet], which builds every component with a
+/// builder that counts, in [builds], how many times it built the component of each node.
+Future<void> _pumpEditorWithStylesheet(
+  WidgetTester tester, {
+  required ValueNotifier<Stylesheet> stylesheet,
+  required Map<String, int> builds,
+}) async {
+  final editor = createDefaultDocumentEditor(
+    document: MutableDocument(
+      nodes: [
+        ParagraphNode(
+          id: "0",
+          text: AttributedText("A header"),
+          metadata: const {"blockType": header1Attribution},
+        ),
+        for (int i = 1; i < 10; i += 1)
+          ParagraphNode(id: "$i", text: AttributedText("Paragraph $i. Lorem ipsum dolor sit amet.")),
+      ],
+    ),
+    composer: MutableDocumentComposer(),
+  );
+  // The same builders in every build, so that only the stylesheet changes.
+  final componentBuilders = [_BuildCountingComponentBuilder(builds), ...defaultComponentBuilders];
+
+  await tester.pumpWidget(
+    MaterialApp(
+      home: Scaffold(
+        body: ValueListenableBuilder<Stylesheet>(
+          valueListenable: stylesheet,
+          builder: (context, stylesheet, child) => SuperEditor(
+            editor: editor,
+            stylesheet: stylesheet,
+            componentBuilders: componentBuilders,
+          ),
+        ),
+      ),
+    ),
+  );
+}
+
+/// A rule that colors the text of level one headers.
+StyleRule _header1Color(Color color) => StyleRule(
+      const BlockSelector("header1"),
+      (document, node) => {Styles.textStyle: TextStyle(color: color)},
+    );
+
+/// Builds the default components, and counts how many times it built the component of
+/// each node.
+class _BuildCountingComponentBuilder implements ComponentBuilder {
+  const _BuildCountingComponentBuilder(this.builds);
+
+  final Map<String, int> builds;
+
+  @override
+  SingleColumnLayoutComponentViewModel? createViewModel(Document document, DocumentNode node) => null;
+
+  @override
+  Widget? createComponent(
+    SingleColumnDocumentComponentContext componentContext,
+    SingleColumnLayoutComponentViewModel componentViewModel,
+  ) {
+    for (final builder in defaultComponentBuilders) {
+      final component = builder.createComponent(componentContext, componentViewModel);
+      if (component != null) {
+        builds[componentViewModel.nodeId] = (builds[componentViewModel.nodeId] ?? 0) + 1;
+        return component;
+      }
+    }
+    return null;
+  }
 }
 
 InlineSpan _findSpanAtOffset(

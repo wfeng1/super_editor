@@ -106,6 +106,7 @@ export 'src/infrastructure/documents/document_layers.dart';
 export 'src/infrastructure/documents/document_scroller.dart';
 export 'src/infrastructure/documents/selection_leader_document_layer.dart';
 export 'src/infrastructure/flutter/overlay_with_groups.dart';
+export 'src/infrastructure/flutter/releasable_overlay_builder.dart';
 export 'src/infrastructure/flutter/row_wrap.dart';
 export 'src/infrastructure/flutter/text_selection.dart';
 export 'src/infrastructure/ime_input_owner.dart';

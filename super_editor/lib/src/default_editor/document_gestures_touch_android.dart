@@ -33,6 +33,7 @@ import 'package:super_editor/src/infrastructure/platforms/mobile_documents.dart'
 import 'package:super_editor/src/infrastructure/signal_notifier.dart';
 import 'package:super_editor/src/infrastructure/sliver_hybrid_stack.dart';
 import 'package:super_editor/src/infrastructure/touch_controls.dart';
+import 'package:super_editor/src/infrastructure/flutter/releasable_overlay_builder.dart';
 import 'package:super_keyboard/super_keyboard.dart';
 
 import '../infrastructure/document_gestures.dart';
@@ -675,6 +676,15 @@ class _AndroidDocumentTouchInteractorState extends State<AndroidDocumentTouchInt
       return;
     }
 
+    final interactorRenderBox = _interactor.currentContext?.findRenderObject() as RenderBox?;
+    if (interactorRenderBox == null || !interactorRenderBox.hasSize) {
+      // The editor hasn't been laid out, e.g., it was built beneath an opaque route,
+      // so the document layout can't report the selection rect. There's nothing to
+      // scroll to.
+      editorGesturesLog.fine("Can't ensure selection extent is visible - the editor hasn't been laid out.");
+      return;
+    }
+
     // Calculate the y-value of the selection extent side of the selected content so that we
     // can ensure they're visible.
     final selectionRectInDocumentLayout =
@@ -1304,7 +1314,7 @@ class _AndroidDocumentTouchInteractorState extends State<AndroidDocumentTouchInt
 
   @override
   Widget build(BuildContext context) {
-    final gestureSettings = MediaQuery.maybeOf(context)?.gestureSettings;
+    final gestureSettings = MediaQuery.maybeGestureSettingsOf(context);
     // PanGestureRecognizer is above contents to have first pass at gestures, but it only accepts
     // gestures that are over caret or handles or when a long press is in progress.
     // TapGestureRecognizer is below contents so that it doesn't interferes with buttons and other
@@ -1415,6 +1425,7 @@ class SuperEditorAndroidControlsOverlayManager extends StatefulWidget {
 class SuperEditorAndroidControlsOverlayManagerState extends State<SuperEditorAndroidControlsOverlayManager> {
   final _boundsKey = GlobalKey();
   final _overlayController = OverlayPortalController();
+  late final _overlayChild = ReleasableOverlayBuilder(_buildOverlay);
 
   SuperEditorAndroidControlsController? _controlsController;
   late FollowerAligner _toolbarAligner;
@@ -1514,6 +1525,8 @@ class SuperEditorAndroidControlsOverlayManagerState extends State<SuperEditorAnd
     widget.dragHandleAutoScroller.value?.stopAutoScrollHandleMonitoring();
     widget.scrollChangeSignal.removeListener(_onDocumentScroll);
     widget.selection.removeListener(_onSelectionChange);
+
+    _overlayChild.release();
 
     super.dispose();
   }
@@ -1781,7 +1794,7 @@ class SuperEditorAndroidControlsOverlayManagerState extends State<SuperEditorAnd
         widget.child!,
         OverlayPortal(
           controller: _overlayController,
-          overlayChildBuilder: _buildOverlay,
+          overlayChildBuilder: _overlayChild.build,
           child: const SizedBox(),
         ),
       ],
@@ -1867,7 +1880,7 @@ class SuperEditorAndroidControlsOverlayManagerState extends State<SuperEditorAnd
                           ..onUpdate = _collapsedHandleGestureDelegate.onPanUpdate
                           ..onEnd = _collapsedHandleGestureDelegate.onPanEnd
                           ..onCancel = _collapsedHandleGestureDelegate.onPanCancel
-                          ..gestureSettings = MediaQuery.maybeOf(context)?.gestureSettings;
+                          ..gestureSettings = MediaQuery.maybeGestureSettingsOf(context);
                       },
                     ),
                   },
@@ -1937,7 +1950,7 @@ class SuperEditorAndroidControlsOverlayManagerState extends State<SuperEditorAnd
                       ..onUpdate = _upstreamHandleGesturesDelegate.onPanUpdate
                       ..onEnd = _upstreamHandleGesturesDelegate.onPanEnd
                       ..onCancel = _upstreamHandleGesturesDelegate.onPanCancel
-                      ..gestureSettings = MediaQuery.maybeOf(context)?.gestureSettings;
+                      ..gestureSettings = MediaQuery.maybeGestureSettingsOf(context);
                   },
                 ),
               },
@@ -1980,7 +1993,7 @@ class SuperEditorAndroidControlsOverlayManagerState extends State<SuperEditorAnd
                       ..onUpdate = _downstreamHandleGesturesDelegate.onPanUpdate
                       ..onEnd = _downstreamHandleGesturesDelegate.onPanEnd
                       ..onCancel = _downstreamHandleGesturesDelegate.onPanCancel
-                      ..gestureSettings = MediaQuery.maybeOf(context)?.gestureSettings;
+                      ..gestureSettings = MediaQuery.maybeGestureSettingsOf(context);
                   },
                 ),
               },

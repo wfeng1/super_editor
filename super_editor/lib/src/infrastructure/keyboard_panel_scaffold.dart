@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:super_editor/src/default_editor/document_ime/document_input_ime.dart';
 import 'package:super_editor/src/infrastructure/_logging.dart';
 import 'package:super_editor/src/infrastructure/flutter/flutter_scheduler.dart';
+import 'package:super_editor/src/infrastructure/flutter/releasable_overlay_builder.dart';
 import 'package:super_keyboard/super_keyboard.dart';
 
 /// Scaffold that displays the given [contentBuilder], while also (optionally) displaying
@@ -123,6 +124,13 @@ class _KeyboardPanelScaffoldState<PanelType> extends State<KeyboardPanelScaffold
   /// Shows/hides the [OverlayPortal] containing the keyboard panel and above-keyboard panel.
   final OverlayPortalController _overlayPortalController = OverlayPortalController();
 
+  /// Builds the keyboard panel and above-keyboard panel in the [OverlayPortal], and holds
+  /// its content, until this `State` is disposed.
+  late final _overlayChild = ReleasableOverlayBuilder(_buildOverlay);
+
+  /// Whether the latest [build] shows the keyboard panel, for the overlay.
+  bool _shouldShowKeyboardPanel = false;
+
   bool get _wantsToShowToolbar =>
       widget.controller.toolbarVisibility == KeyboardToolbarVisibility.visible ||
       (widget.controller.toolbarVisibility == KeyboardToolbarVisibility.auto &&
@@ -236,6 +244,8 @@ class _KeyboardPanelScaffoldState<PanelType> extends State<KeyboardPanelScaffold
     }
 
     _listeners.clear();
+
+    _overlayChild.release();
 
     super.dispose();
   }
@@ -681,61 +691,69 @@ Building keyboard scaffold
       return true;
     }());
 
+    _shouldShowKeyboardPanel = shouldShowKeyboardPanel;
+
     return OverlayPortal(
       controller: _overlayPortalController,
-      overlayChildBuilder: (context) {
-        return ValueListenableBuilder(
-          valueListenable: _currentBottomSpacing,
-          builder: (context, currentHeight, child) {
-            onNextFrame((_) {
-              // Ensure that our latest keyboard height/panel height calculations are
-              // accounted for in the ancestor safe area after this layout pass.
-              _updateSafeArea();
-            });
+      overlayChildBuilder: _overlayChild.build,
+      child: _overlayChild.child(
+        widget.contentBuilder(
+          context,
+          _activePanel,
+        ),
+      ),
+    );
+  }
 
-            if (!_wantsToShowToolbar && !shouldShowKeyboardPanel) {
-              return const SizedBox.shrink();
-            }
+  Widget _buildOverlay(BuildContext context) {
+    final shouldShowKeyboardPanel = _shouldShowKeyboardPanel;
 
-            return Positioned(
-              bottom: 0,
-              left: 0,
-              right: 0,
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  if (_wantsToShowToolbar)
-                    KeyedSubtree(
-                      key: _toolbarKey,
-                      child: widget.toolbarBuilder(
-                        context,
-                        _activePanel,
-                      ),
-                    ),
-                  // Spacer that pushes the toolbar up above the current bottom spacing,
-                  // whether that's the software keyboard, or a panel.
-                  AnimatedBuilder(
-                    animation: _currentBottomSpacing,
-                    builder: (context, child) {
-                      return SizedBox(
-                        height: _currentBottomSpacing.value,
-                        child: child,
-                      );
-                    },
-                    // In the case that we want to display a panel, display it here,
-                    // in the current bottom space below the toolbar.
-                    child: shouldShowKeyboardPanel ? widget.keyboardPanelBuilder(context, _activePanel) : null,
+    return ValueListenableBuilder(
+      valueListenable: _currentBottomSpacing,
+      builder: (context, currentHeight, child) {
+        onNextFrame((_) {
+          // Ensure that our latest keyboard height/panel height calculations are
+          // accounted for in the ancestor safe area after this layout pass.
+          _updateSafeArea();
+        });
+
+        if (!_wantsToShowToolbar && !shouldShowKeyboardPanel) {
+          return const SizedBox.shrink();
+        }
+
+        return Positioned(
+          bottom: 0,
+          left: 0,
+          right: 0,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (_wantsToShowToolbar)
+                KeyedSubtree(
+                  key: _toolbarKey,
+                  child: widget.toolbarBuilder(
+                    context,
+                    _activePanel,
                   ),
-                ],
+                ),
+              // Spacer that pushes the toolbar up above the current bottom spacing,
+              // whether that's the software keyboard, or a panel.
+              AnimatedBuilder(
+                animation: _currentBottomSpacing,
+                builder: (context, child) {
+                  return SizedBox(
+                    height: _currentBottomSpacing.value,
+                    child: child,
+                  );
+                },
+                // In the case that we want to display a panel, display it here,
+                // in the current bottom space below the toolbar.
+                child: shouldShowKeyboardPanel ? widget.keyboardPanelBuilder(context, _activePanel) : null,
               ),
-            );
-          },
+            ],
+          ),
         );
       },
-      child: widget.contentBuilder(
-        context,
-        _activePanel,
-      ),
     );
   }
 }

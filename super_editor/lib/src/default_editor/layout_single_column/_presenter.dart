@@ -52,28 +52,59 @@ class SingleColumnDocumentComponentContext {
 /// components changed, through [SingleColumnLayoutStylePhase.styleChanges],
 /// so that a phase that styles each component on its own can restyle only
 /// those, instead of every component in the document.
+///
+/// The presenter owns the phases of its pipeline, and disposes them in [dispose],
+/// except for the `sharedPhases` that it's given, such as an app's phases, which it
+/// only stops listening to.
 class SingleColumnLayoutPresenter {
   SingleColumnLayoutPresenter({
     required Document document,
     required List<ComponentBuilder> componentBuilders,
     required List<SingleColumnLayoutStylePhase> pipeline,
+    Set<SingleColumnLayoutStylePhase> sharedPhases = const {},
   })  : _document = document,
         _componentBuilders = componentBuilders,
-        _pipeline = pipeline {
+        _pipeline = pipeline,
+        _sharedPhases = sharedPhases {
     _assemblePipeline();
     _viewModel = _createNewViewModel();
     _document.addListener(_onDocumentChange);
   }
 
+  /// Stops listening to the document and to the phases, disposes the phases that this
+  /// presenter owns, and drops the cached view models.
+  ///
+  /// The [viewModel] stays, for anyone that reads it until it rebuilds with another
+  /// presenter, but it isn't updated anymore.
   void dispose() {
     _listeners.clear();
     _document.removeListener(_onDocumentChange);
     _disassemblePipeline();
+
+    // Drop what the presenter caches to restyle quickly, which holds a component view
+    // model for every node, and the nodes themselves, in case the presenter is still
+    // referenced.
+    _phaseViewModels.clear();
+    _baseViewModel = null;
+    _baseNodes = const [];
+    // Nothing is dirty anymore, so that an update does nothing.
+    _earliestDirtyPhase = _pipeline.length;
   }
 
   final Document _document;
   final List<ComponentBuilder> _componentBuilders;
   final List<SingleColumnLayoutStylePhase> _pipeline;
+
+  /// The phases in the [_pipeline] that this presenter doesn't own, such as an app's
+  /// style phases that several presenters use, one after the other.
+  ///
+  /// [dispose] doesn't dispose them, and only stops them from marking this presenter
+  /// dirty, if another presenter hasn't taken them over already.
+  final Set<SingleColumnLayoutStylePhase> _sharedPhases;
+
+  /// The dirty callback that this presenter gave each phase of the [_pipeline].
+  final List<VoidCallback> _dirtyCallbacks = [];
+
   final List<SingleColumnLayoutViewModel?> _phaseViewModels = [];
   int _earliestDirtyPhase = 0;
 
@@ -98,6 +129,10 @@ class SingleColumnLayoutPresenter {
     _listeners.remove(listener);
   }
 
+  /// The number of change listeners that are registered with this presenter.
+  @visibleForTesting
+  int get debugChangeListenerCount => _listeners.length;
+
   void _onDocumentChange(_) {
     editorLayoutLog.info("The document changed. Marking the presenter dirty.");
     final wasDirty = isDirty;
@@ -119,7 +154,7 @@ class SingleColumnLayoutPresenter {
       _phaseViewModels.add(null);
 
       // Listen for all dirty phase notifications.
-      _pipeline[i].dirtyCallback = () {
+      void onPhaseDirty() {
         final phaseIndex = i;
         if (phaseIndex < 0) {
           throw Exception("A phase marked itself as dirty, but that phase isn't in the pipeline. Index: $phaseIndex");
@@ -138,14 +173,28 @@ class SingleColumnLayoutPresenter {
             listener.onPresenterMarkedDirty();
           }
         }
-      };
+      }
+
+      _dirtyCallbacks.add(onPhaseDirty);
+      _pipeline[i].dirtyCallback = _dirtyCallbacks.last;
     }
   }
 
   void _disassemblePipeline() {
-    for (final phase in _pipeline) {
-      phase.dispose();
+    for (int i = 0; i < _pipeline.length; i += 1) {
+      final phase = _pipeline[i];
+      if (!_sharedPhases.contains(phase)) {
+        phase.dispose();
+        continue;
+      }
+
+      // Another presenter may have given the shared phase its own callback since. Only
+      // clear the phase's callback when it's still ours.
+      if (i < _dirtyCallbacks.length && identical(phase._dirtyCallback, _dirtyCallbacks[i])) {
+        phase._dirtyCallback = null;
+      }
     }
+    _dirtyCallbacks.clear();
   }
 
   void updateViewModel() {
@@ -280,9 +329,13 @@ class SingleColumnLayoutPresenter {
   }) {
     editorLayoutLog.finer("Computing layout view model changes to notify listeners of those changes.");
 
+    // The layout pads its components with the view model's padding, e.g., the stylesheet's
+    // document padding, which can change while no component does.
+    final didPaddingChange = oldViewModel.padding != newViewModel.padding;
+
     final changedInPlace = _changedInPlace(oldViewModel, newViewModel);
     if (changedInPlace != null) {
-      if (changedInPlace.isEmpty) {
+      if (changedInPlace.isEmpty && !didPaddingChange) {
         editorLayoutLog.fine("Nothing has changed in the view model. Not notifying any listeners.");
         return;
       }
@@ -393,7 +446,11 @@ class SingleColumnLayoutPresenter {
       }
     }
 
-    if (addedComponents.isEmpty && movedComponents.isEmpty && changedComponents.isEmpty && removedComponents.isEmpty) {
+    if (addedComponents.isEmpty &&
+        movedComponents.isEmpty &&
+        changedComponents.isEmpty &&
+        removedComponents.isEmpty &&
+        !didPaddingChange) {
       // No changes to report.
       editorLayoutLog.fine("Nothing has changed in the view model. Not notifying any listeners.");
       return;
@@ -414,9 +471,10 @@ class SingleColumnLayoutPresenter {
     }
   }
 
-  /// The components of [newViewModel] that changed from [oldViewModel], when
-  /// both have the same nodes in the same order and every component kept its
-  /// type, or `null` otherwise.
+  /// The components of [newViewModel] that look different from those of
+  /// [oldViewModel], as [SingleColumnLayoutComponentViewModel.looksTheSameAs]
+  /// tells, when both have the same nodes in the same order and every component
+  /// kept its type, or `null` otherwise.
   List<String>? _changedInPlace(SingleColumnLayoutViewModel oldViewModel, SingleColumnLayoutViewModel newViewModel) {
     final oldComponents = oldViewModel.componentViewModels;
     final newComponents = newViewModel.componentViewModels;
@@ -431,7 +489,7 @@ class SingleColumnLayoutPresenter {
       if (oldComponent.nodeId != newComponent.nodeId || oldComponent.runtimeType != newComponent.runtimeType) {
         return null;
       }
-      if (oldComponent != newComponent) {
+      if (!oldComponent.looksTheSameAs(newComponent)) {
         changed.add(newComponent.nodeId);
       }
     }
@@ -650,6 +708,15 @@ abstract class SingleColumnLayoutComponentViewModel {
   }
 
   SingleColumnLayoutComponentViewModel copy();
+
+  /// Whether a component built from this view model looks the same as one built from
+  /// [other], which tells the presenter which components to build again when nodes
+  /// weren't added, removed, or moved, e.g., after a style change.
+  ///
+  /// It's [==] by default. A view model whose [==] leaves out something that changes
+  /// how its component looks, e.g., a function that builds its text styles, should
+  /// compare what that something produces, too.
+  bool looksTheSameAs(SingleColumnLayoutComponentViewModel other) => identical(this, other) || this == other;
 
   @override
   bool operator ==(Object other) =>

@@ -8,6 +8,7 @@ import 'package:super_editor/src/core/document_composer.dart';
 import 'package:super_editor/src/core/document_layout.dart';
 import 'package:super_editor/src/core/document_selection.dart';
 import 'package:super_editor/src/default_editor/document_gestures_touch_ios.dart';
+import 'package:super_editor/src/default_editor/layout_single_column/_layout.dart';
 import 'package:super_editor/src/infrastructure/_logging.dart';
 import 'package:super_editor/src/infrastructure/content_layers.dart';
 import 'package:super_editor/src/infrastructure/documents/document_layers.dart';
@@ -695,7 +696,10 @@ class IosControlsDocumentLayerState extends DocumentLayoutLayerState<IosHandlesD
   /// top and bottom of the selection hightlight box. This method computes an
   /// expanded selection based on the given [position], computes the box for that
   /// selection, and returns the edge of the selection box.
-  Rect _computeRectForExpandedHandle(DocumentPosition position) {
+  ///
+  /// Returns `null` if the layout can't report the rect, e.g., because it doesn't display
+  /// the node at [position] at the moment.
+  Rect? _computeRectForExpandedHandle(DocumentPosition position) {
     final component = widget.documentLayout.getComponentByNodeId(position.nodeId);
     if (component == null) {
       return Rect.zero;
@@ -716,7 +720,7 @@ class IosControlsDocumentLayerState extends DocumentLayoutLayerState<IosHandlesD
       // to rect for the position, which relies on Flutter's computation for the
       // caret offset and height. Flutter's computation produces different offset
       // a height from what is returned by the selection highlight box.
-      return widget.documentLayout.getRectForPosition(position)!;
+      return widget.documentLayout.getRectForPosition(position);
     }
 
     final rectForSelection = widget.documentLayout.getRectForSelection(
@@ -725,7 +729,10 @@ class IosControlsDocumentLayerState extends DocumentLayoutLayerState<IosHandlesD
         nodeId: position.nodeId,
         nodePosition: extentNodePosition,
       ),
-    )!;
+    );
+    if (rectForSelection == null) {
+      return null;
+    }
 
     return Rect.fromLTWH(
       isExtentDownstream ? rectForSelection.left : rectForSelection.right,
@@ -743,6 +750,18 @@ class IosControlsDocumentLayerState extends DocumentLayoutLayerState<IosHandlesD
       return null;
     }
 
+    if (documentLayout is ProgressiveDocumentLayout) {
+      // A layout that lays out progressively might not have built the selected nodes yet.
+      // Build them, and position the controls after that.
+      final progressiveLayout = documentLayout as ProgressiveDocumentLayout;
+      final unbuiltNodeIds =
+          {selection.base.nodeId, selection.extent.nodeId}.where(progressiveLayout.isComponentDeferred).toList();
+      if (unbuiltNodeIds.isNotEmpty) {
+        progressiveLayout.ensureComponentsBuilt(unbuiltNodeIds);
+        return null;
+      }
+    }
+
     if (documentLayout.getComponentByNodeId(selection.base.nodeId) == null ||
         documentLayout.getComponentByNodeId(selection.extent.nodeId) == null) {
       // The layout doesn't currently display the selected content, e.g., a style phase
@@ -757,7 +776,11 @@ class IosControlsDocumentLayerState extends DocumentLayoutLayerState<IosHandlesD
     }
 
     if (selection.isCollapsed) {
-      Rect caretRect = documentLayout.getEdgeForPosition(selection.extent)!;
+      final caretEdge = documentLayout.getEdgeForPosition(selection.extent);
+      if (caretEdge == null) {
+        return null;
+      }
+      Rect caretRect = caretEdge;
 
       // Default caret width used by IOSCollapsedHandle.
       const caretWidth = 2;
@@ -802,13 +825,20 @@ class IosControlsDocumentLayerState extends DocumentLayoutLayerState<IosHandlesD
         caret: caretRect,
       );
     } else {
+      final upstream = _computeRectForExpandedHandle(
+        widget.document.selectUpstreamPosition(selection.base, selection.extent),
+      );
+      final downstream = _computeRectForExpandedHandle(
+        widget.document.selectDownstreamPosition(selection.base, selection.extent),
+      );
+      if (upstream == null || downstream == null) {
+        // The layout can't position one of the handles at the moment. We expect this
+        // method to run again in a moment.
+        return null;
+      }
       return DocumentSelectionLayout(
-        upstream: _computeRectForExpandedHandle(
-          widget.document.selectUpstreamPosition(selection.base, selection.extent),
-        ),
-        downstream: _computeRectForExpandedHandle(
-          widget.document.selectDownstreamPosition(selection.base, selection.extent),
-        ),
+        upstream: upstream,
+        downstream: downstream,
         expandedSelectionBounds: documentLayout.getRectForSelection(
           selection.base,
           selection.extent,

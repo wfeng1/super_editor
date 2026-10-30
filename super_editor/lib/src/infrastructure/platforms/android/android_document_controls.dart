@@ -9,6 +9,7 @@ import 'package:super_editor/src/core/document_composer.dart';
 import 'package:super_editor/src/core/document_layout.dart';
 import 'package:super_editor/src/core/document_selection.dart';
 import 'package:super_editor/src/default_editor/document_gestures_touch_android.dart';
+import 'package:super_editor/src/default_editor/layout_single_column/_layout.dart';
 import 'package:super_editor/src/infrastructure/_logging.dart';
 import 'package:super_editor/src/infrastructure/content_layers.dart';
 import 'package:super_editor/src/infrastructure/documents/document_layers.dart';
@@ -329,6 +330,18 @@ class AndroidControlsDocumentLayerState
       return null;
     }
 
+    if (documentLayout is ProgressiveDocumentLayout) {
+      // A layout that lays out progressively might not have built the selected nodes yet.
+      // Build them, and position the controls after that.
+      final progressiveLayout = documentLayout as ProgressiveDocumentLayout;
+      final unbuiltNodeIds =
+          {selection.base.nodeId, selection.extent.nodeId}.where(progressiveLayout.isComponentDeferred).toList();
+      if (unbuiltNodeIds.isNotEmpty) {
+        progressiveLayout.ensureComponentsBuilt(unbuiltNodeIds);
+        return null;
+      }
+    }
+
     if (documentLayout.getComponentByNodeId(selection.base.nodeId) == null ||
         documentLayout.getComponentByNodeId(selection.extent.nodeId) == null) {
       // The layout doesn't currently display the selected content, e.g., a style phase
@@ -343,7 +356,11 @@ class AndroidControlsDocumentLayerState
     }
 
     if (selection.isCollapsed && !_controlsController!.shouldShowExpandedHandles.value) {
-      Rect caretRect = documentLayout.getEdgeForPosition(selection.extent)!;
+      final caretEdge = documentLayout.getEdgeForPosition(selection.extent);
+      if (caretEdge == null) {
+        return null;
+      }
+      Rect caretRect = caretEdge;
 
       // Default caret width used by the Android caret.
       const caretWidth = 2;
@@ -391,13 +408,20 @@ class AndroidControlsDocumentLayerState
         caret: caretRect,
       );
     } else {
+      final upstream = documentLayout.getRectForPosition(
+        widget.document.selectUpstreamPosition(selection.base, selection.extent),
+      );
+      final downstream = documentLayout.getRectForPosition(
+        widget.document.selectDownstreamPosition(selection.base, selection.extent),
+      );
+      if (upstream == null || downstream == null) {
+        // The layout can't position one of the handles at the moment. We expect this
+        // method to run again in a moment.
+        return null;
+      }
       return DocumentSelectionLayout(
-        upstream: documentLayout.getRectForPosition(
-          widget.document.selectUpstreamPosition(selection.base, selection.extent),
-        )!,
-        downstream: documentLayout.getRectForPosition(
-          widget.document.selectDownstreamPosition(selection.base, selection.extent),
-        )!,
+        upstream: upstream,
+        downstream: downstream,
         expandedSelectionBounds: documentLayout.getRectForSelection(
           selection.base,
           selection.extent,

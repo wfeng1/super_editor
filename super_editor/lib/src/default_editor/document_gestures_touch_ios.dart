@@ -22,6 +22,7 @@ import 'package:super_editor/src/infrastructure/flutter/build_context.dart';
 import 'package:super_editor/src/infrastructure/flutter/eager_pan_gesture_recognizer.dart';
 import 'package:super_editor/src/infrastructure/flutter/empty_box.dart';
 import 'package:super_editor/src/infrastructure/flutter/flutter_scheduler.dart';
+import 'package:super_editor/src/infrastructure/flutter/releasable_overlay_builder.dart';
 import 'package:super_editor/src/infrastructure/multi_tap_gesture.dart';
 import 'package:super_editor/src/infrastructure/platforms/ios/floating_cursor.dart';
 import 'package:super_editor/src/infrastructure/platforms/ios/ios_document_controls.dart';
@@ -502,6 +503,15 @@ class _IosDocumentTouchInteractorState extends State<IosDocumentTouchInteractor>
     final selection = widget.selection.value;
     if (selection == null) {
       // There's no selection. We don't need to take any action.
+      return;
+    }
+
+    final interactorRenderBox = _interactor.currentContext?.findRenderObject() as RenderBox?;
+    if (interactorRenderBox == null || !interactorRenderBox.hasSize) {
+      // The editor hasn't been laid out, e.g., it was built beneath an opaque route,
+      // so the document layout can't report the selection rect. There's nothing to
+      // scroll to.
+      editorGesturesLog.fine("Can't ensure selection extent is visible - the editor hasn't been laid out.");
       return;
     }
 
@@ -1449,7 +1459,7 @@ class _IosDocumentTouchInteractorState extends State<IosDocumentTouchInteractor>
       }
     }
 
-    final gestureSettings = MediaQuery.maybeOf(context)?.gestureSettings;
+    final gestureSettings = MediaQuery.maybeGestureSettingsOf(context);
     // PanGestureRecognizer is above contents to have first pass at gestures, but it only accepts
     // gestures that are over caret or handles or when a long press is in progress.
     // TapGestureRecognizer is below contents so that it doesn't interferes with buttons and other
@@ -1575,6 +1585,7 @@ class SuperEditorIosToolbarOverlayManager extends StatefulWidget {
 @visibleForTesting
 class SuperEditorIosToolbarOverlayManagerState extends State<SuperEditorIosToolbarOverlayManager> {
   final OverlayPortalController _overlayPortalController = OverlayPortalController();
+  late final _overlayChild = ReleasableOverlayBuilder(_buildToolbar);
   SuperEditorIosControlsController? _controlsController;
 
   @override
@@ -1591,6 +1602,12 @@ class SuperEditorIosToolbarOverlayManagerState extends State<SuperEditorIosToolb
     });
   }
 
+  @override
+  void dispose() {
+    _overlayChild.release();
+    super.dispose();
+  }
+
   @visibleForTesting
   bool get wantsToDisplayToolbar => _controlsController!.shouldShowToolbar.value;
 
@@ -1601,7 +1618,7 @@ class SuperEditorIosToolbarOverlayManagerState extends State<SuperEditorIosToolb
         widget.child,
         OverlayPortal(
           controller: _overlayPortalController,
-          overlayChildBuilder: _buildToolbar,
+          overlayChildBuilder: _overlayChild.build,
           child: const SizedBox(),
         ),
       ],
@@ -1641,6 +1658,7 @@ class SuperEditorIosMagnifierOverlayManager extends StatefulWidget {
 class SuperEditorIosMagnifierOverlayManagerState extends State<SuperEditorIosMagnifierOverlayManager>
     with SingleTickerProviderStateMixin {
   final OverlayPortalController _overlayPortalController = OverlayPortalController();
+  late final _overlayChild = ReleasableOverlayBuilder(_buildMagnifier);
   SuperEditorIosControlsController? _controlsController;
 
   @visibleForTesting
@@ -1660,13 +1678,19 @@ class SuperEditorIosMagnifierOverlayManagerState extends State<SuperEditorIosMag
   }
 
   @override
+  void dispose() {
+    _overlayChild.release();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
     return SliverHybridStack(
       children: [
         widget.child,
         OverlayPortal(
           controller: _overlayPortalController,
-          overlayChildBuilder: _buildMagnifier,
+          overlayChildBuilder: _overlayChild.build,
           child: const SizedBox(),
         ),
       ],

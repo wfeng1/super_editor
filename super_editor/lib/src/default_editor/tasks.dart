@@ -157,6 +157,17 @@ class TaskComponentBuilder implements ComponentBuilder {
 
   final Editor _editor;
 
+  // Two builders for the same editor build the same components. `SuperEditor` creates a
+  // new one every time it's rebuilt, and the document layout compares its component
+  // builders, so that it doesn't rebuild every component when nothing changed.
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is TaskComponentBuilder && runtimeType == other.runtimeType && identical(_editor, other._editor);
+
+  @override
+  int get hashCode => identityHashCode(_editor);
+
   @override
   TaskComponentViewModel? createViewModel(Document document, DocumentNode node) {
     if (node is! TaskNode) {
