@@ -22,7 +22,6 @@ import 'package:super_editor/src/infrastructure/platforms/ios/magnifier.dart';
 import 'package:super_editor/src/infrastructure/platforms/mobile_documents.dart';
 import 'package:super_editor/src/infrastructure/platforms/platform.dart';
 import 'package:super_editor/src/infrastructure/document_context.dart';
-import 'package:super_editor/src/infrastructure/flutter/releasable_overlay_builder.dart';
 
 /// Adds and removes an iOS-style editor toolbar, as dictated by an ancestor
 /// [SuperMessageIosControlsScope].
@@ -48,7 +47,6 @@ class SuperMessageIosToolbarOverlayManager extends StatefulWidget {
 @visibleForTesting
 class SuperMessageIosToolbarOverlayManagerState extends State<SuperMessageIosToolbarOverlayManager> {
   final OverlayPortalController _overlayPortalController = OverlayPortalController();
-  late final _overlayChild = ReleasableOverlayBuilder(_buildToolbar);
   SuperMessageIosControlsController? _controlsController;
 
   @visibleForTesting
@@ -69,19 +67,13 @@ class SuperMessageIosToolbarOverlayManagerState extends State<SuperMessageIosToo
   }
 
   @override
-  void dispose() {
-    _overlayChild.release();
-    super.dispose();
-  }
-
-  @override
   Widget build(BuildContext context) {
     return Stack(
       children: [
         widget.child!,
         OverlayPortal(
           controller: _overlayPortalController,
-          overlayChildBuilder: _overlayChild.build,
+          overlayChildBuilder: _buildToolbar,
           child: const SizedBox(),
         ),
       ],
@@ -121,7 +113,6 @@ class SuperMessageIosMagnifierOverlayManager extends StatefulWidget {
 class SuperMessageIosMagnifierOverlayManagerState extends State<SuperMessageIosMagnifierOverlayManager>
     with SingleTickerProviderStateMixin {
   final OverlayPortalController _overlayPortalController = OverlayPortalController();
-  late final _overlayChild = ReleasableOverlayBuilder(_buildMagnifier);
   SuperMessageIosControlsController? _controlsController;
 
   @visibleForTesting
@@ -142,19 +133,13 @@ class SuperMessageIosMagnifierOverlayManagerState extends State<SuperMessageIosM
   }
 
   @override
-  void dispose() {
-    _overlayChild.release();
-    super.dispose();
-  }
-
-  @override
   Widget build(BuildContext context) {
     return Stack(
       children: [
         widget.child!,
         OverlayPortal(
           controller: _overlayPortalController,
-          overlayChildBuilder: _overlayChild.build,
+          overlayChildBuilder: _buildMagnifier,
           child: const SizedBox(),
         ),
       ],

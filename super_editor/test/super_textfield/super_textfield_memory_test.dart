@@ -1,17 +1,13 @@
 import 'package:flutter/material.dart';
-import 'package:flutter/semantics.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:flutter_test_runners/flutter_test_runners.dart';
 import 'package:leak_tracker/leak_tracker.dart';
 import 'package:super_editor/super_editor.dart';
 
 void main() {
   group('SuperTextField > memory >', () {
-    testWidgetsOnMobile('frees the text field once its page closes', (tester) async {
-      // Flutter 3.44 keeps every disposed OverlayPortal's state while semantics are on, and
-      // the mobile text fields build their editing controls in an OverlayPortal.
-      expect(SemanticsBinding.instance.semanticsEnabled, isTrue);
-
+    // Semantics off: Flutter 3.44 keeps a disposed OverlayPortal's state while semantics
+    // are on (flutter/flutter#186118), and with it whatever the portal built.
+    testWidgets('frees the text field once its page closes', (tester) async {
       final navigator = GlobalKey<NavigatorState>();
       await tester.pumpWidget(MaterialApp(navigatorKey: navigator, home: const SizedBox()));
 
@@ -27,7 +23,7 @@ void main() {
 
       await tester.runAsync(() => forceGC(fullGcCycles: 10));
       expect(textField.target, isNull, reason: "The text field's State is still reachable");
-    });
+    }, variant: const TargetPlatformVariant({TargetPlatform.android, TargetPlatform.iOS}), semanticsEnabled: false);
   });
 }
 

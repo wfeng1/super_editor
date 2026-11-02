@@ -1,6 +1,5 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/semantics.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_test_runners/flutter_test_runners.dart';
 import 'package:leak_tracker/leak_tracker.dart';
@@ -11,13 +10,9 @@ import 'package:super_editor/super_reader_test.dart';
 
 void main() {
   group('SuperReader > memory >', () {
-    testWidgetsOnMobile('frees its page, with the reader, its document and its presenter, once the page closes',
-        (tester) async {
-      // Flutter 3.44 keeps every disposed OverlayPortal's state while semantics are on, and
-      // SuperReader's overlay managers build their toolbar, magnifier and handles in
-      // OverlayPortals.
-      expect(SemanticsBinding.instance.semanticsEnabled, isTrue);
-
+    // Semantics off: Flutter 3.44 keeps a disposed OverlayPortal's state while semantics
+    // are on (flutter/flutter#186118), and with it whatever the portal built.
+    testWidgets('frees its page, with the reader, its document and its presenter, once the page closes', (tester) async {
       final navigator = GlobalKey<NavigatorState>();
       await tester.pumpWidget(MaterialApp(navigatorKey: navigator, home: const SizedBox()));
 
@@ -44,7 +39,7 @@ void main() {
       expect(page.readerState.target, isNull, reason: "The SuperReaderState is still reachable");
       expect(page.document.target, isNull, reason: "The document is still reachable");
       expect(page.presenter.target, isNull, reason: "The presenter is still reachable");
-    });
+    }, variant: const TargetPlatformVariant({TargetPlatform.android, TargetPlatform.iOS}), semanticsEnabled: false);
 
     testWidgetsOnAllPlatforms("disposes its presenter, which a document that outlives the reader doesn't keep",
         (tester) async {

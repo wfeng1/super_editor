@@ -1,5 +1,4 @@
 import 'package:flutter/material.dart';
-import 'package:flutter/semantics.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_test_runners/flutter_test_runners.dart';
 import 'package:leak_tracker/leak_tracker.dart';
@@ -9,13 +8,9 @@ import 'package:super_editor/super_editor_test.dart';
 
 void main() {
   group('SuperEditor > memory >', () {
-    testWidgetsOnMobile('frees its page, with the editor, its document and its presenter, once the page closes',
-        (tester) async {
-      // Flutter 3.44 keeps every disposed OverlayPortal's state while semantics are on, and
-      // SuperEditor's overlay managers build their toolbar, magnifier and handles in
-      // OverlayPortals.
-      expect(SemanticsBinding.instance.semanticsEnabled, isTrue);
-
+    // Semantics off: Flutter 3.44 keeps a disposed OverlayPortal's state while semantics
+    // are on (flutter/flutter#186118), and with it whatever the portal built.
+    testWidgets('frees its page, with the editor, its document and its presenter, once the page closes', (tester) async {
       final navigator = GlobalKey<NavigatorState>();
       await tester.pumpWidget(MaterialApp(navigatorKey: navigator, home: const SizedBox()));
 
@@ -41,7 +36,7 @@ void main() {
       expect(page.editorState.target, isNull, reason: "The SuperEditorState is still reachable");
       expect(page.document.target, isNull, reason: "The document is still reachable");
       expect(page.presenter.target, isNull, reason: "The presenter is still reachable");
-    });
+    }, variant: const TargetPlatformVariant({TargetPlatform.android, TargetPlatform.iOS}), semanticsEnabled: false);
 
     testWidgetsOnAllPlatforms("disposes its presenter, which a document that outlives the editor doesn't keep",
         (tester) async {
@@ -70,7 +65,9 @@ void main() {
       editor.dispose();
     });
 
-    testWidgetsOnAllPlatforms("isn't kept by an ancestor Scrollable that outlives it", (tester) async {
+    // Semantics off: Flutter 3.44 keeps a disposed OverlayPortal's state while semantics
+    // are on (flutter/flutter#186118), and with it whatever the portal built.
+    testWidgets("isn't kept by an ancestor Scrollable that outlives it", (tester) async {
       final scrollController = ScrollController();
       addTearDown(scrollController.dispose);
 
@@ -90,7 +87,7 @@ void main() {
 
       // The scroll view is still in use.
       expect(scrollController.hasClients, isTrue);
-    });
+    }, variant: TargetPlatformVariant.all(excluding: {TargetPlatform.fuchsia}), semanticsEnabled: false);
 
     testWidgets("leaves the style phases that the app gives it to the app", (tester) async {
       final editor = createDefaultDocumentEditor(document: MutableDocument(nodes: _paragraphs()));

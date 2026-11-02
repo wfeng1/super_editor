@@ -18,7 +18,6 @@ import 'package:super_editor/src/super_textfield/infrastructure/text_field_gestu
 import 'package:super_editor/src/super_textfield/infrastructure/text_scrollview.dart';
 import 'package:super_editor/src/super_textfield/input_method_engine/_ime_text_editing_controller.dart';
 import 'package:super_editor/src/super_textfield/ios/editing_controls.dart';
-import 'package:super_editor/src/infrastructure/flutter/releasable_overlay_builder.dart';
 import 'package:super_text_layout/super_text_layout.dart';
 
 import '../metrics.dart';
@@ -219,7 +218,6 @@ class SuperIOSTextFieldState extends State<SuperIOSTextField>
   /// Opens/closes the popover that displays the toolbar and magnifier, and
   // positions the invisible touch targets for base/extent dragging.
   final _popoverController = OverlayPortalController();
-  late final _popoverChild = ReleasableOverlayBuilder(_buildOverlayIosControls);
 
   late final BlinkController _caretBlinkController;
 
@@ -388,8 +386,6 @@ class SuperIOSTextFieldState extends State<SuperIOSTextField>
     WidgetsBinding.instance.removeObserver(this);
 
     _overlayControlsRebuildSignal.dispose();
-
-    _popoverChild.release();
 
     super.dispose();
   }
@@ -699,26 +695,22 @@ class SuperIOSTextFieldState extends State<SuperIOSTextField>
 
           return OverlayPortal(
             controller: _popoverController,
-            overlayChildBuilder: _popoverChild.build,
-            // The portal keeps its child once it's disposed, and the caret's blink
-            // controller reaches this State.
-            child: _popoverChild.child(
-              Stack(
-                clipBehavior: Clip.none,
-                children: [
-                  TextLayoutCaret(
-                    textLayout: textLayout,
-                    style: widget.caretStyle,
-                    position: _textEditingController.selection.isCollapsed //
-                        ? _textEditingController.selection.extent
-                        : null,
-                    blinkController: _caretBlinkController,
-                  ),
-                  IOSFloatingCursor(
-                    controller: _floatingCursorController,
-                  ),
-                ],
-              ),
+            overlayChildBuilder: _buildOverlayIosControls,
+            child: Stack(
+              clipBehavior: Clip.none,
+              children: [
+                TextLayoutCaret(
+                  textLayout: textLayout,
+                  style: widget.caretStyle,
+                  position: _textEditingController.selection.isCollapsed //
+                      ? _textEditingController.selection.extent
+                      : null,
+                  blinkController: _caretBlinkController,
+                ),
+                IOSFloatingCursor(
+                  controller: _floatingCursorController,
+                ),
+              ],
             ),
           );
         },

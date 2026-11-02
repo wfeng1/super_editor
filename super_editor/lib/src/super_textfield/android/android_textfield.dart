@@ -17,7 +17,6 @@ import 'package:super_editor/src/super_textfield/infrastructure/hint_text.dart';
 import 'package:super_editor/src/super_textfield/infrastructure/text_field_gestures_interaction_overrides.dart';
 import 'package:super_editor/src/super_textfield/infrastructure/text_scrollview.dart';
 import 'package:super_editor/src/super_textfield/input_method_engine/_ime_text_editing_controller.dart';
-import 'package:super_editor/src/infrastructure/flutter/releasable_overlay_builder.dart';
 import 'package:super_text_layout/super_text_layout.dart';
 
 import '../../infrastructure/_logging.dart';
@@ -207,7 +206,6 @@ class SuperAndroidTextFieldState extends State<SuperAndroidTextField>
   /// Opens/closes the popover that displays the toolbar and magnifier, and
   // positions the invisible touch targets for base/extent dragging.
   final _popoverController = OverlayPortalController();
-  late final _popoverChild = ReleasableOverlayBuilder(_buildPopoverToolbar);
 
   late final BlinkController _caretBlinkController;
 
@@ -365,8 +363,6 @@ class SuperAndroidTextFieldState extends State<SuperAndroidTextField>
     _popoverRebuildSignal.dispose();
 
     WidgetsBinding.instance.removeObserver(this);
-
-    _popoverChild.release();
 
     super.dispose();
   }
@@ -693,18 +689,14 @@ class SuperAndroidTextFieldState extends State<SuperAndroidTextField>
 
           return OverlayPortal(
             controller: _popoverController,
-            overlayChildBuilder: _popoverChild.build,
-            // The portal keeps its child once it's disposed, and the caret's blink
-            // controller reaches this State.
-            child: _popoverChild.child(
-              TextLayoutCaret(
-                textLayout: textLayout,
-                style: widget.caretStyle,
-                position: _textEditingController.selection.isCollapsed //
-                    ? _textEditingController.selection.extent
-                    : null,
-                blinkController: _caretBlinkController,
-              ),
+            overlayChildBuilder: _buildPopoverToolbar,
+            child: TextLayoutCaret(
+              textLayout: textLayout,
+              style: widget.caretStyle,
+              position: _textEditingController.selection.isCollapsed //
+                  ? _textEditingController.selection.extent
+                  : null,
+              blinkController: _caretBlinkController,
             ),
           );
         },

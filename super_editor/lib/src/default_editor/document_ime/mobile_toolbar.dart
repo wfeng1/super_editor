@@ -11,7 +11,6 @@ import 'package:super_editor/src/default_editor/paragraph.dart';
 import 'package:super_editor/src/default_editor/text.dart';
 import 'package:super_editor/src/infrastructure/flutter/flutter_scheduler.dart';
 import 'package:super_editor/src/infrastructure/flutter/overlay_with_groups.dart';
-import 'package:super_editor/src/infrastructure/flutter/releasable_overlay_builder.dart';
 
 import '../attributions.dart';
 
@@ -63,7 +62,6 @@ class _KeyboardEditingToolbarState extends State<KeyboardEditingToolbar> with Wi
   late KeyboardEditingToolbarOperations _toolbarOps;
 
   final _portalController = GroupedOverlayPortalController(displayPriority: OverlayGroupPriority.windowChrome);
-  late final _overlayChild = ReleasableOverlayBuilder(_buildToolbarOverlay);
 
   double _toolbarHeight = 0;
 
@@ -105,7 +103,6 @@ class _KeyboardEditingToolbarState extends State<KeyboardEditingToolbar> with Wi
       _portalController.hide();
     }
     _portalController.dispose();
-    _overlayChild.release();
     super.dispose();
   }
 
@@ -126,7 +123,7 @@ class _KeyboardEditingToolbarState extends State<KeyboardEditingToolbar> with Wi
   Widget build(BuildContext context) {
     return OverlayPortal(
       controller: _portalController,
-      overlayChildBuilder: _overlayChild.build,
+      overlayChildBuilder: _buildToolbarOverlay,
       // Take up empty space that's as tall as the toolbar so that other content
       // doesn't layout behind it.
       child: SizedBox(height: widget.takeUpSameSpaceAsToolbar ? _toolbarHeight : 0),

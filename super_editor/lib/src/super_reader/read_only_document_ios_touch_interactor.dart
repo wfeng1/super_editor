@@ -29,7 +29,6 @@ import 'package:super_editor/src/infrastructure/sliver_hybrid_stack.dart';
 import 'package:super_editor/src/infrastructure/touch_controls.dart';
 import 'package:super_editor/src/super_reader/reader_context.dart';
 import 'package:super_editor/src/super_reader/super_reader.dart';
-import 'package:super_editor/src/infrastructure/flutter/releasable_overlay_builder.dart';
 
 /// An [InheritedWidget] that provides shared access to a [SuperReaderIosControlsController],
 /// which coordinates the state of iOS controls like drag handles, magnifier, and toolbar.
@@ -1068,7 +1067,6 @@ class SuperReaderIosToolbarOverlayManager extends StatefulWidget {
 @visibleForTesting
 class SuperReaderIosToolbarOverlayManagerState extends State<SuperReaderIosToolbarOverlayManager> {
   final OverlayPortalController _overlayPortalController = OverlayPortalController();
-  late final _overlayChild = ReleasableOverlayBuilder(_buildToolbar);
   SuperReaderIosControlsController? _controlsContext;
 
   @visibleForTesting
@@ -1089,19 +1087,13 @@ class SuperReaderIosToolbarOverlayManagerState extends State<SuperReaderIosToolb
   }
 
   @override
-  void dispose() {
-    _overlayChild.release();
-    super.dispose();
-  }
-
-  @override
   Widget build(BuildContext context) {
     return SliverHybridStack(
       children: [
         widget.child!,
         OverlayPortal(
           controller: _overlayPortalController,
-          overlayChildBuilder: _overlayChild.build,
+          overlayChildBuilder: _buildToolbar,
           child: const SizedBox(),
         ),
       ],
@@ -1141,7 +1133,6 @@ class SuperReaderIosMagnifierOverlayManager extends StatefulWidget {
 class SuperReaderIosMagnifierOverlayManagerState extends State<SuperReaderIosMagnifierOverlayManager>
     with SingleTickerProviderStateMixin {
   final OverlayPortalController _overlayPortalController = OverlayPortalController();
-  late final _overlayChild = ReleasableOverlayBuilder(_buildMagnifier);
   SuperReaderIosControlsController? _controlsContext;
 
   @visibleForTesting
@@ -1162,19 +1153,13 @@ class SuperReaderIosMagnifierOverlayManagerState extends State<SuperReaderIosMag
   }
 
   @override
-  void dispose() {
-    _overlayChild.release();
-    super.dispose();
-  }
-
-  @override
   Widget build(BuildContext context) {
     return SliverHybridStack(
       children: [
         widget.child!,
         OverlayPortal(
           controller: _overlayPortalController,
-          overlayChildBuilder: _overlayChild.build,
+          overlayChildBuilder: _buildMagnifier,
           child: const SizedBox(),
         ),
       ],
