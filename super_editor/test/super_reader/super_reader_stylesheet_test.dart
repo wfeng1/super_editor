@@ -52,6 +52,51 @@ void main() {
       });
     });
 
+    group("when the style phases change >", () {
+      testWidgets("applies the style phases that come with a new stylesheet", (tester) async {
+        final stylesheet = ValueNotifier(readOnlyDefaultStylesheet);
+        addTearDown(stylesheet.dispose);
+        final phases = ValueNotifier<List<SingleColumnLayoutStylePhase>>([_LeftPaddingPhase(10)]);
+        addTearDown(phases.dispose);
+        await _pumpReaderWithStyles(tester, stylesheet: stylesheet, phases: phases);
+        final leftBefore = SuperReaderInspector.findComponentOffset("1", Alignment.topLeft).dx;
+
+        // Give the reader a new stylesheet and new style phases in the same build, as an app
+        // does when its text scale changes.
+        stylesheet.value = readOnlyDefaultStylesheet.copyWith(addRulesAfter: [_header1Color(Colors.green)]);
+        phases.value = [_LeftPaddingPhase(30)];
+        await tester.pump();
+
+        // Ensure that both the new stylesheet and the new style phase applied.
+        expect(SuperReaderInspector.findParagraphStyle("0")!.color, Colors.green);
+        expect(
+          SuperReaderInspector.findComponentOffset("1", Alignment.topLeft).dx,
+          moreOrLessEquals(leftBefore + 20),
+          reason: "The new style phase's padding didn't apply",
+        );
+      });
+
+      testWidgets("applies new style phases with the same stylesheet", (tester) async {
+        final stylesheet = ValueNotifier(readOnlyDefaultStylesheet);
+        addTearDown(stylesheet.dispose);
+        final phases = ValueNotifier<List<SingleColumnLayoutStylePhase>>([_LeftPaddingPhase(10)]);
+        addTearDown(phases.dispose);
+        await _pumpReaderWithStyles(tester, stylesheet: stylesheet, phases: phases);
+        final leftBefore = SuperReaderInspector.findComponentOffset("1", Alignment.topLeft).dx;
+
+        // Give the reader new style phases.
+        phases.value = [_LeftPaddingPhase(30)];
+        await tester.pump();
+
+        // Ensure that the new style phase applied.
+        expect(
+          SuperReaderInspector.findComponentOffset("1", Alignment.topLeft).dx,
+          moreOrLessEquals(leftBefore + 20),
+          reason: "The new style phase's padding didn't apply",
+        );
+      });
+    });
+
     group("style text", () {
       testWidgetsOnArbitraryDesktop("with left alignment", (tester) async {
         await _pumpReader(tester, stylesheet: _stylesheetWithTextAlignment(TextAlign.left));
@@ -159,6 +204,61 @@ Future<void> _pumpReaderWithStylesheet(
 }
 
 /// A rule that colors the text of level one headers.
+/// Pumps a [SuperReader] with the [stylesheet] and the custom style [phases], each of
+/// which the test can replace.
+Future<void> _pumpReaderWithStyles(
+  WidgetTester tester, {
+  required ValueNotifier<Stylesheet> stylesheet,
+  required ValueNotifier<List<SingleColumnLayoutStylePhase>> phases,
+}) async {
+  final editor = createDefaultDocumentEditor(
+    document: MutableDocument(
+      nodes: [
+        ParagraphNode(
+          id: "0",
+          text: AttributedText("A header"),
+          metadata: const {"blockType": header1Attribution},
+        ),
+        ParagraphNode(id: "1", text: AttributedText("A paragraph")),
+      ],
+    ),
+    composer: MutableDocumentComposer(),
+  );
+
+  await tester.pumpWidget(
+    MaterialApp(
+      home: Scaffold(
+        body: ListenableBuilder(
+          listenable: Listenable.merge([stylesheet, phases]),
+          builder: (context, child) => SuperReader(
+            editor: editor,
+            stylesheet: stylesheet.value,
+            customStylePhases: phases.value,
+          ),
+        ),
+      ),
+    ),
+  );
+}
+
+/// A style phase that pads every component on its left by [left].
+class _LeftPaddingPhase extends SingleColumnLayoutStylePhase {
+  _LeftPaddingPhase(this.left);
+
+  final double left;
+
+  @override
+  SingleColumnLayoutViewModel style(Document document, SingleColumnLayoutViewModel viewModel) {
+    return SingleColumnLayoutViewModel(
+      padding: viewModel.padding,
+      componentViewModels: [
+        for (final component in viewModel.componentViewModels) //
+          component.copy()..padding = EdgeInsets.only(left: left),
+      ],
+    );
+  }
+}
+
 StyleRule _header1Color(Color color) => StyleRule(
       const BlockSelector("header1"),
       (document, node) => {Styles.textStyle: TextStyle(color: color)},

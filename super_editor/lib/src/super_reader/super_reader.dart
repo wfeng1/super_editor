@@ -301,7 +301,12 @@ class SuperReaderState extends State<SuperReader> {
       _createReaderContext();
     }
 
-    if (widget.stylesheet != oldWidget.stylesheet) {
+    if (!listEquals(widget.customStylePhases, oldWidget.customStylePhases) ||
+        !listEquals(widget.componentBuilders, oldWidget.componentBuilders)) {
+      // Different style phases, or component builders, change how every view model is made,
+      // which only a new presenter takes on. It takes the new stylesheet too.
+      _createLayoutPresenter();
+    } else if (widget.stylesheet != oldWidget.stylesheet) {
       // Restyle with the existing presenter, which builds only the components that look
       // different again, rather than a new presenter, which would build every component.
       _docStylesheetStyler.stylesheet = widget.stylesheet;

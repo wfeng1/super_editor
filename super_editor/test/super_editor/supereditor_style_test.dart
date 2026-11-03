@@ -189,6 +189,51 @@ A paragraph
       });
     });
 
+    group("when the style phases change >", () {
+      testWidgets("applies the style phases that come with a new stylesheet", (tester) async {
+        final stylesheet = ValueNotifier(defaultStylesheet);
+        addTearDown(stylesheet.dispose);
+        final phases = ValueNotifier<List<SingleColumnLayoutStylePhase>>([_LeftPaddingPhase(10)]);
+        addTearDown(phases.dispose);
+        await _pumpEditorWithStyles(tester, stylesheet: stylesheet, phases: phases);
+        final leftBefore = SuperEditorInspector.findComponentOffset("1", Alignment.topLeft).dx;
+
+        // Give the editor a new stylesheet and new style phases in the same build, as an app
+        // does when its text scale changes.
+        stylesheet.value = defaultStylesheet.copyWith(addRulesAfter: [_header1Color(Colors.green)]);
+        phases.value = [_LeftPaddingPhase(30)];
+        await tester.pump();
+
+        // Ensure that both the new stylesheet and the new style phase applied.
+        expect(SuperEditorInspector.findParagraphStyle("0")!.color, Colors.green);
+        expect(
+          SuperEditorInspector.findComponentOffset("1", Alignment.topLeft).dx,
+          moreOrLessEquals(leftBefore + 20),
+          reason: "The new style phase's padding didn't apply",
+        );
+      });
+
+      testWidgets("applies new style phases with the same stylesheet", (tester) async {
+        final stylesheet = ValueNotifier(defaultStylesheet);
+        addTearDown(stylesheet.dispose);
+        final phases = ValueNotifier<List<SingleColumnLayoutStylePhase>>([_LeftPaddingPhase(10)]);
+        addTearDown(phases.dispose);
+        await _pumpEditorWithStyles(tester, stylesheet: stylesheet, phases: phases);
+        final leftBefore = SuperEditorInspector.findComponentOffset("1", Alignment.topLeft).dx;
+
+        // Give the editor new style phases.
+        phases.value = [_LeftPaddingPhase(30)];
+        await tester.pump();
+
+        // Ensure that the new style phase applied.
+        expect(
+          SuperEditorInspector.findComponentOffset("1", Alignment.topLeft).dx,
+          moreOrLessEquals(leftBefore + 20),
+          reason: "The new style phase's padding didn't apply",
+        );
+      });
+    });
+
     testWidgetsOnArbitraryDesktop('rebuilds only changed nodes', (tester) async {
       int componentChangedCount = 0;
 
@@ -323,6 +368,61 @@ Future<void> _pumpEditorWithStylesheet(
       ),
     ),
   );
+}
+
+/// Pumps a [SuperEditor] with the [stylesheet] and the custom style [phases], each of
+/// which the test can replace.
+Future<void> _pumpEditorWithStyles(
+  WidgetTester tester, {
+  required ValueNotifier<Stylesheet> stylesheet,
+  required ValueNotifier<List<SingleColumnLayoutStylePhase>> phases,
+}) async {
+  final editor = createDefaultDocumentEditor(
+    document: MutableDocument(
+      nodes: [
+        ParagraphNode(
+          id: "0",
+          text: AttributedText("A header"),
+          metadata: const {"blockType": header1Attribution},
+        ),
+        ParagraphNode(id: "1", text: AttributedText("A paragraph")),
+      ],
+    ),
+    composer: MutableDocumentComposer(),
+  );
+
+  await tester.pumpWidget(
+    MaterialApp(
+      home: Scaffold(
+        body: ListenableBuilder(
+          listenable: Listenable.merge([stylesheet, phases]),
+          builder: (context, child) => SuperEditor(
+            editor: editor,
+            stylesheet: stylesheet.value,
+            customStylePhases: phases.value,
+          ),
+        ),
+      ),
+    ),
+  );
+}
+
+/// A style phase that pads every component on its left by [left].
+class _LeftPaddingPhase extends SingleColumnLayoutStylePhase {
+  _LeftPaddingPhase(this.left);
+
+  final double left;
+
+  @override
+  SingleColumnLayoutViewModel style(Document document, SingleColumnLayoutViewModel viewModel) {
+    return SingleColumnLayoutViewModel(
+      padding: viewModel.padding,
+      componentViewModels: [
+        for (final component in viewModel.componentViewModels) //
+          component.copy()..padding = EdgeInsets.only(left: left),
+      ],
+    );
+  }
 }
 
 /// A rule that colors the text of level one headers.
