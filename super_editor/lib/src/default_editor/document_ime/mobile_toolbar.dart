@@ -77,6 +77,10 @@ class _KeyboardEditingToolbarState extends State<KeyboardEditingToolbar> with Wi
     );
 
     WidgetsBinding.instance.runAsSoonAsPossible(() {
+      if (!mounted) {
+        // Showing the controller once it's disposed would keep it among the visible ones.
+        return;
+      }
       _portalController.show();
     });
   }
@@ -98,6 +102,7 @@ class _KeyboardEditingToolbarState extends State<KeyboardEditingToolbar> with Wi
     if (_portalController.isShowing) {
       _portalController.hide();
     }
+    _portalController.dispose();
     super.dispose();
   }
 

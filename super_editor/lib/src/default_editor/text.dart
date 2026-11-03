@@ -652,6 +652,41 @@ mixin TextComponentViewModel on SingleColumnLayoutComponentViewModel {
     ];
   }
 
+  /// Whether a component built from this view model looks the same as one built from
+  /// [other]: they're equal, their [textStyleBuilder]s build the same styles for every
+  /// set of attributions in the [text], and they have the same [inlineWidgetBuilders],
+  /// neither of which equality compares.
+  @override
+  bool looksTheSameAs(SingleColumnLayoutComponentViewModel other) {
+    if (identical(this, other)) {
+      return true;
+    }
+    if (this != other || other is! TextComponentViewModel) {
+      return false;
+    }
+    if (!const ListEquality<InlineWidgetBuilder>().equals(inlineWidgetBuilders, other.inlineWidgetBuilders)) {
+      return false;
+    }
+
+    final styleBuilder = textStyleBuilder;
+    final otherStyleBuilder = other.textStyleBuilder;
+    if (identical(styleBuilder, otherStyleBuilder)) {
+      return true;
+    }
+    if (styleBuilder(const {}) != otherStyleBuilder(const {})) {
+      return false;
+    }
+    if (text.length == 0) {
+      return true;
+    }
+    for (final span in text.computeAttributionSpans()) {
+      if (span.attributions.isNotEmpty && styleBuilder(span.attributions) != otherStyleBuilder(span.attributions)) {
+        return false;
+      }
+    }
+    return true;
+  }
+
   bool textViewModelEquals(Object other) =>
       identical(this, other) ||
       super == other &&

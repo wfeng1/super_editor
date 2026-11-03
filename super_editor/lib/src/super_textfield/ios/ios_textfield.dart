@@ -359,6 +359,11 @@ class SuperIOSTextFieldState extends State<SuperIOSTextField>
       ..removeListener(_onTextOrSelectionChange)
       ..onIOSFloatingCursorChange = null
       ..detachFromIme();
+    if (_textEditingController.onPerformActionPressed == _onPerformActionPressed) {
+      // Flutter's TextInput keeps its last client, the controller, after it detaches, so
+      // don't let the controller keep this State.
+      _textEditingController.onPerformActionPressed = null;
+    }
     if (widget.textController == null) {
       WidgetsBinding.instance.addPostFrameCallback((timeStamp) {
         // Dispose after the current frame so that other widgets have

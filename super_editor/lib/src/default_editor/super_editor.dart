@@ -1,5 +1,5 @@
 import 'package:attributed_text/attributed_text.dart';
-import 'package:flutter/foundation.dart' show ValueListenable, defaultTargetPlatform;
+import 'package:flutter/foundation.dart' show ValueListenable, defaultTargetPlatform, listEquals;
 import 'package:flutter/material.dart' hide SelectableText;
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
@@ -142,6 +142,7 @@ class SuperEditor extends StatefulWidget {
     this.plugins = const {},
     this.debugPaint = const DebugPaintConfig(),
     this.shrinkWrap = false,
+    this.progressiveLayout,
     this.log = const SuperEditorPrintLog(),
   })  : stylesheet = stylesheet ?? defaultStylesheet,
         selectionStyles = selectionStyle ?? defaultSelectionStyle,
@@ -384,6 +385,17 @@ class SuperEditor extends StatefulWidget {
   /// Only used when editor is not inside an scrollable.
   final bool shrinkWrap;
 
+  /// Shows the first frame before the whole document is built, and builds the rest over
+  /// the following frames, when given, or builds the whole document in the first frame,
+  /// when `null`.
+  ///
+  /// Editing should wait until the layout built everything, which its
+  /// [SingleColumnProgressiveLayout.controller] reports. Ignored when [shrinkWrap] is
+  /// `true`, and in a `SuperEditorDryLayout`.
+  ///
+  /// See [SingleColumnProgressiveLayout].
+  final SingleColumnProgressiveLayout? progressiveLayout;
+
   /// A log that reports specific errors and exceptional events that occur while
   /// running a [SuperEditor].
   ///
@@ -553,8 +565,16 @@ class SuperEditorState extends State<SuperEditor> {
       if (widget.selectionStyles != oldWidget.selectionStyles) {
         _docLayoutSelectionStyler.selectionStyles = widget.selectionStyles;
       }
-      if (widget.stylesheet != oldWidget.stylesheet) {
+      if (!listEquals(widget.customStylePhases, oldWidget.customStylePhases) ||
+          !listEquals(widget.componentBuilders, oldWidget.componentBuilders)) {
+        // Different style phases, or component builders, change how every view model is made,
+        // which only a new presenter takes on. It takes the new stylesheet too.
         _createLayoutPresenter();
+      } else if (widget.stylesheet != oldWidget.stylesheet) {
+        // Restyle with the existing presenter, which builds only the components that look
+        // different again, rather than a new presenter, which would build every component.
+        _docStylesheetStyler.stylesheet = widget.stylesheet;
+        _docLayoutSelectionStyler.selectedTextColorStrategy = widget.stylesheet.selectedTextColorStrategy;
       }
     }
 
@@ -587,6 +607,14 @@ class SuperEditorState extends State<SuperEditor> {
 
     _iosControlsController.dispose();
     _androidControlsController.dispose();
+
+    // The presenter listens to the document, and its selection and composing region
+    // stylers listen to the composer, which can outlive this editor. Disposing it stops
+    // them from keeping the presenter, and every view model it caches, alive.
+    _docLayoutPresenter?.dispose();
+    _docLayoutPresenter = null;
+
+    _autoScrollController.dispose();
 
     widget.editor.context.remove(Editor.layoutKey, _documentLayoutEditable);
 
@@ -659,6 +687,11 @@ class SuperEditorState extends State<SuperEditor> {
         defaultTargetPlatform == TargetPlatform.iOS ||
         defaultTargetPlatform == TargetPlatform.android;
 
+    final pluginStylePhases = [
+      for (final plugin in widget.plugins) //
+        ...plugin.appendedStylePhases,
+    ];
+
     _docLayoutPresenter = SingleColumnLayoutPresenter(
       document: document,
       componentBuilders: widget.componentBuilders,
@@ -677,9 +710,15 @@ class SuperEditorState extends State<SuperEditor> {
         // just before the phases that the app wants to be at the end
         // to minimize view model recalculations.
         _docLayoutSelectionStyler,
-        for (final plugin in widget.plugins) //
-          ...plugin.appendedStylePhases,
+        ...pluginStylePhases,
       ],
+      // The presenter disposes the stylers made for it, above. The underline styler
+      // outlives it, and the app's and plugins' phases aren't this editor's to dispose.
+      sharedPhases: {
+        _customUnderlineStyler,
+        ...widget.customStylePhases,
+        ...pluginStylePhases,
+      },
     );
 
     _recomputeIfLayoutShouldShowCaret();
@@ -766,6 +805,7 @@ class SuperEditorState extends State<SuperEditor> {
               presenter: presenter,
               componentBuilders: widget.componentBuilders,
               shrinkWrap: widget.shrinkWrap,
+              progressiveLayout: widget.progressiveLayout,
               underlays: [
                 // Add all underlays from plugins.
                 for (final plugin in widget.plugins) //

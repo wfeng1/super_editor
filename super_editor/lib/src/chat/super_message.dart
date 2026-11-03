@@ -242,6 +242,11 @@ class _SuperMessageState extends State<SuperMessage> {
 
     _iOSControlsController.dispose();
 
+    // The presenter listens to the document, and its selection styler listens to the
+    // composer, which can outlive this message.
+    _presenter?.dispose();
+    _presenter = null;
+
     super.dispose();
   }
 
@@ -281,6 +286,12 @@ class _SuperMessageState extends State<SuperMessage> {
         // to minimize view model recalculations.
         _docLayoutSelectionStyler,
       ],
+      // The presenter disposes the stylers made for it, above. The underline styler
+      // outlives it, and the app's phases aren't this message's to dispose.
+      sharedPhases: {
+        _customUnderlineStyler,
+        ...widget.customStylePhases,
+      },
     );
 
     _messageContext = DocumentContext(

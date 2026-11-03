@@ -675,6 +675,15 @@ class _AndroidDocumentTouchInteractorState extends State<AndroidDocumentTouchInt
       return;
     }
 
+    final interactorRenderBox = _interactor.currentContext?.findRenderObject() as RenderBox?;
+    if (interactorRenderBox == null || !interactorRenderBox.hasSize) {
+      // The editor hasn't been laid out, e.g., it was built beneath an opaque route,
+      // so the document layout can't report the selection rect. There's nothing to
+      // scroll to.
+      editorGesturesLog.fine("Can't ensure selection extent is visible - the editor hasn't been laid out.");
+      return;
+    }
+
     // Calculate the y-value of the selection extent side of the selected content so that we
     // can ensure they're visible.
     final selectionRectInDocumentLayout =
@@ -1304,7 +1313,7 @@ class _AndroidDocumentTouchInteractorState extends State<AndroidDocumentTouchInt
 
   @override
   Widget build(BuildContext context) {
-    final gestureSettings = MediaQuery.maybeOf(context)?.gestureSettings;
+    final gestureSettings = MediaQuery.maybeGestureSettingsOf(context);
     // PanGestureRecognizer is above contents to have first pass at gestures, but it only accepts
     // gestures that are over caret or handles or when a long press is in progress.
     // TapGestureRecognizer is below contents so that it doesn't interferes with buttons and other
@@ -1867,7 +1876,7 @@ class SuperEditorAndroidControlsOverlayManagerState extends State<SuperEditorAnd
                           ..onUpdate = _collapsedHandleGestureDelegate.onPanUpdate
                           ..onEnd = _collapsedHandleGestureDelegate.onPanEnd
                           ..onCancel = _collapsedHandleGestureDelegate.onPanCancel
-                          ..gestureSettings = MediaQuery.maybeOf(context)?.gestureSettings;
+                          ..gestureSettings = MediaQuery.maybeGestureSettingsOf(context);
                       },
                     ),
                   },
@@ -1937,7 +1946,7 @@ class SuperEditorAndroidControlsOverlayManagerState extends State<SuperEditorAnd
                       ..onUpdate = _upstreamHandleGesturesDelegate.onPanUpdate
                       ..onEnd = _upstreamHandleGesturesDelegate.onPanEnd
                       ..onCancel = _upstreamHandleGesturesDelegate.onPanCancel
-                      ..gestureSettings = MediaQuery.maybeOf(context)?.gestureSettings;
+                      ..gestureSettings = MediaQuery.maybeGestureSettingsOf(context);
                   },
                 ),
               },
@@ -1980,7 +1989,7 @@ class SuperEditorAndroidControlsOverlayManagerState extends State<SuperEditorAnd
                       ..onUpdate = _downstreamHandleGesturesDelegate.onPanUpdate
                       ..onEnd = _downstreamHandleGesturesDelegate.onPanEnd
                       ..onCancel = _downstreamHandleGesturesDelegate.onPanCancel
-                      ..gestureSettings = MediaQuery.maybeOf(context)?.gestureSettings;
+                      ..gestureSettings = MediaQuery.maybeGestureSettingsOf(context);
                   },
                 ),
               },

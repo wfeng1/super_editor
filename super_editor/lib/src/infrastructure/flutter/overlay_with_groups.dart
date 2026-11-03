@@ -65,6 +65,16 @@ class GroupedOverlayPortalController extends OverlayPortalController {
   /// relative to other [GroupedOverlayPortalController]s in the app [Overlay].
   final OverlayGroupPriority displayPriority;
 
+  /// Stops ordering this controller with the others, once its owner no longer uses it.
+  ///
+  /// A shown controller stays in a static list of the visible controllers until it's
+  /// hidden. Unless its owner disposes it, a controller whose owner is disposed while it
+  /// shows stays in that list for good, and is shown again every time another controller
+  /// is shown.
+  void dispose() {
+    _visibleControllers.remove(this);
+  }
+
   @override
   void show() {
     if (!_isReworkingOrder) {

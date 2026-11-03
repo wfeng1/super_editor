@@ -5,6 +5,7 @@ import 'package:follow_the_leader/follow_the_leader.dart';
 import 'package:super_editor/src/core/document.dart';
 import 'package:super_editor/src/core/document_layout.dart';
 import 'package:super_editor/src/core/document_selection.dart';
+import 'package:super_editor/src/default_editor/layout_single_column/_layout.dart';
 import 'package:super_editor/src/infrastructure/content_layers.dart';
 import 'package:super_editor/src/infrastructure/documents/document_layers.dart';
 
@@ -89,6 +90,20 @@ class _SelectionLeadersDocumentLayerState
       return null;
     }
 
+    if (documentLayout is ProgressiveDocumentLayout) {
+      // A layout that lays out progressively might not have built the selected nodes yet,
+      // e.g., after the app selected content far away. Build them, and position the
+      // leaders after that.
+      final progressiveLayout = documentLayout as ProgressiveDocumentLayout;
+      final unbuiltNodeIds = {documentSelection.base.nodeId, documentSelection.extent.nodeId}
+          .where(progressiveLayout.isComponentDeferred)
+          .toList();
+      if (unbuiltNodeIds.isNotEmpty) {
+        progressiveLayout.ensureComponentsBuilt(unbuiltNodeIds);
+        return null;
+      }
+    }
+
     final selectedComponent = documentLayout.getComponentByNodeId(widget.selection.value!.extent.nodeId);
     if (selectedComponent == null) {
       // Assume that we're in a momentary transitive state where the document layout
@@ -98,17 +113,28 @@ class _SelectionLeadersDocumentLayerState
     }
 
     if (documentSelection.isCollapsed) {
+      final caret = documentLayout.getRectForPosition(documentSelection.extent);
+      if (caret == null) {
+        return null;
+      }
       return DocumentSelectionLayout(
-        caret: documentLayout.getRectForPosition(documentSelection.extent)!,
+        caret: caret,
       );
     } else {
+      final upstream = documentLayout.getRectForPosition(
+        widget.document.selectUpstreamPosition(documentSelection.base, documentSelection.extent),
+      );
+      final downstream = documentLayout.getRectForPosition(
+        widget.document.selectDownstreamPosition(documentSelection.base, documentSelection.extent),
+      );
+      if (upstream == null || downstream == null) {
+        // The layout doesn't display one end of the selection, e.g., because it momentarily
+        // lost that component. We expect this method to run again in a moment.
+        return null;
+      }
       return DocumentSelectionLayout(
-        upstream: documentLayout.getRectForPosition(
-          widget.document.selectUpstreamPosition(documentSelection.base, documentSelection.extent),
-        )!,
-        downstream: documentLayout.getRectForPosition(
-          widget.document.selectDownstreamPosition(documentSelection.base, documentSelection.extent),
-        )!,
+        upstream: upstream,
+        downstream: downstream,
         expandedSelectionBounds: documentLayout.getRectForSelection(
           documentSelection.base,
           documentSelection.extent,
